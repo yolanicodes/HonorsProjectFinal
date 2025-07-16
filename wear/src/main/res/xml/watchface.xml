@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<WatchFace xmlns:android="http://schemas.android.com/apk/res/android"
+    width="360"
+    height="360">
+
+    <Scene>
+            <!--Display Digital Watch Face-->
+            <Group>
+                <PartImage
+                    android:backgroundColor="#212a3a"
+                    android:width="360dp"
+                    android:height="360dp"/>
+                <DigitalClock
+                    android:positionX="180"
+                    android:positionY="80"
+                    android:anchorX="0.5"
+                    android:anchorY="0.5"
+                    android:timeFormat12Hour="hh:mm a"
+                    android:timeFormat24Hour="HH:mm"
+                    android:textColor="#FFFFFF"
+                    android:textSize="32sp"
+                    android:fontFamily="sans-serif"/>
+                <!--Heart rate-->
+                <Complication
+                    android:id="@+id/heart_rate"
+                    android:defaultDataSource="TYPE_HEART_RATE"
+                    android:positionX="90"
+                    android:positionY="200"
+                    android:width="40dp"
+                    android:height="40dp" />
+                <!-- Steps -->
+                <Complication
+                    android:id="@+id/steps"
+                    android:defaultDataSource="TYPE_STEP_COUNT"
+                    android:positionX="270"
+                    android:positionY="200"
+                    android:width="40dp"
+                    android:height="40dp" />
+                <!-- Cycle tracking -->
+                <Complication
+                    android:id="@+id/cycle"
+                    android:defaultDataSource="your.custom.datasource.CYCLE"
+                    android:positionX="180"
+                    android:positionY="280"
+                    android:width="40dp"
+                    android:height="40dp" />
+            </Group>
+
+    </Scene>
+</WatchFace>
