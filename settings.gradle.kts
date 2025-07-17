@@ -1,6 +1,12 @@
 pluginManagement {
     repositories {
-        google()
+        google {
+            content {
+                includeGroupByRegex("com\\.android.*")
+                includeGroupByRegex("com\\.google.*")
+                includeGroupByRegex("androidx.*")
+            }
+        }
         mavenCentral()
         gradlePluginPortal()
     }
@@ -13,7 +19,7 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "Fitness And Menstural Cylce Visualisation"
+rootProject.name = "HonorsFinalVersion"
 include(":mobile")
 include(":wear")
  

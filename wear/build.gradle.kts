@@ -33,14 +33,13 @@ android {
     kotlinOptions {
         jvmTarget = "11"
     }
-    useLibrary("wear-sdk")
-    buildFeatures {
-        compose = true
-    }
+//    useLibrary("wear-sdk")
+ buildFeatures {
+     compose = true
+}
 }
 
 dependencies {
-    implementation(libs.play.services.wearable)
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.ui)
     implementation(libs.androidx.ui.graphics)
@@ -59,5 +58,5 @@ dependencies {
     androidTestImplementation(libs.androidx.ui.test.junit4)
     debugImplementation(libs.androidx.ui.tooling)
     debugImplementation(libs.androidx.ui.test.manifest)
-    wearApp(project(":wear"))
+    //wearApp(project(":wear"))
 }

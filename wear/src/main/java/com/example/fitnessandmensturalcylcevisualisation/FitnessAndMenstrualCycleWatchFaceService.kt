@@ -85,10 +85,10 @@ class FitnessAndMenstrualCycleWatchFaceService : WatchFaceService() {
 
 
         override fun render(
-            canvas: android.graphics.Canvas,
+            canvas: Canvas,
             bounds: Rect,
             zonedDateTime: ZonedDateTime,
-            sharedAssets: Renderer.SharedAssets
+            sharedAssets: SharedAssets
         ) {
             // Update health data periodically
             if (zonedDateTime.second % 5 == 0) {
@@ -127,7 +127,7 @@ class FitnessAndMenstrualCycleWatchFaceService : WatchFaceService() {
             TODO("Not yet implemented")
         }
 
-        override suspend fun createSharedAssets(): Renderer.SharedAssets = object : Renderer.SharedAssets {
+        override suspend fun createSharedAssets(): SharedAssets = object : SharedAssets {
             override fun onDestroy() {
                 // No shared assets to destroy in this example
             }
@@ -213,32 +213,31 @@ private fun DrawScope.drawSteps(steps: Int, x: Float, y: Float) {
 private fun DrawScope.drawCycleInfo(cycleDay: Int, cyclePhase: String, x: Float, y: Float) {
     // Cycle phase indicator
     val dropletPath = androidx.compose.ui.graphics.Path().apply {
-        val centerX = x
         val centerY = y - 30f
         val radius = 20f
 
         // Start at the top point of the droplet
-        moveTo(centerX, centerY - radius)
+        moveTo(x, centerY - radius)
 
         // Right side curve - more gradual slope from top
         cubicTo(
-            centerX + radius * 0.3f, centerY - radius * 0.9f,  // Control point 1 (gentle slope start)
-            centerX + radius * 0.9f, centerY - radius * 0.4f,  // Control point 2 (wider bulge)
-            centerX + radius * 0.4f, centerY + radius * 0.4f   // End point (bottom-right)
+            x + radius * 0.3f, centerY - radius * 0.9f,  // Control point 1 (gentle slope start)
+            x + radius * 0.9f, centerY - radius * 0.4f,  // Control point 2 (wider bulge)
+            x + radius * 0.4f, centerY + radius * 0.4f   // End point (bottom-right)
         )
 
         // Bottom curve - from bottom-right to bottom-left (rounded bottom)
         cubicTo(
-            centerX + radius * 0.2f, centerY + radius * 0.7f,  // Control point 1
-            centerX - radius * 0.2f, centerY + radius * 0.7f,  // Control point 2
-            centerX - radius * 0.4f, centerY + radius * 0.4f   // End point (bottom-left)
+            x + radius * 0.2f, centerY + radius * 0.7f,  // Control point 1
+            x - radius * 0.2f, centerY + radius * 0.7f,  // Control point 2
+            x - radius * 0.4f, centerY + radius * 0.4f   // End point (bottom-left)
         )
 
         // Left side curve - steeper slope back to top (asymmetrical)
         cubicTo(
-            centerX - radius * 0.9f, centerY - radius * 0.4f,  // Control point 1 (wider bulge)
-            centerX - radius * 0.4f, centerY - radius * 0.9f,  // Control point 2 (steeper slope)
-            centerX, centerY - radius                           // End point (top)
+            x - radius * 0.9f, centerY - radius * 0.4f,  // Control point 1 (wider bulge)
+            x - radius * 0.4f, centerY - radius * 0.9f,  // Control point 2 (steeper slope)
+            x, centerY - radius                           // End point (top)
         )
 
         close()

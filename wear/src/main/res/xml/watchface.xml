@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<wearableAppPackage xmlns:app="http://schemas.android.com/apk/res-auto">
+    <watchFace
+        app:id="fitness_and_menstrual_cycle_wf"
+        app:name="@string/watch_face_name"
+        app:preview="@drawable/watch_face_design" app:previewLinear="@drawable/watch_face_design">
+
+    </watchFace>
+</wearableAppPackage>
