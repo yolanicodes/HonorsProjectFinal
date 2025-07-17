@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<WatchFacInformation>
+    <Preview value="@drawable/watch_face_design"/>
+    <Category value="CATEGORY_EMPTY"/>
+    <Editable value="true"/>
+</WatchFacInformation>
