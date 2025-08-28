@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="backgroundBlue">#FF212a3a</color>
+    <color name="ovulationPink">#FFff66c4</color>
+    <color name="iconBlue">#FF41b8d5</color>
+    <color name="WhiteText">#FFFFFFFF</color>
+    <color name="GrayInactive">#FF9E9E9E</color>
+    <color name="menstrualRed">#FFFF0000</color>
+    <color name="YellowHZ">#FFFFbd59</color>
+    <color name="OrangeHZ">#FFd97638</color>
+    <color name="darkBlueHZ">#FF004aad</color>
+    <color name="CyanHZ">#FF5ce1e6</color>
+    <color name="lutealPurple">#FF9C27B0</color>
+    <color name="follicleGreen">#FF4CAF50</color>
+    <color name="maroonHZ">#FF800000</color>
+</resources>

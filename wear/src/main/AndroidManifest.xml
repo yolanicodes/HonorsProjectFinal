@@ -1,50 +1,46 @@
-<?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
-
-    <uses-permission android:name="android.permission.WAKE_LOCK" />
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.example.honoursproject">
 
     <uses-feature android:name="android.hardware.type.watch" />
-
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="com.google.android.wearable.permission.RECEIVE_COMPLICATION_DATA"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <application
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.DeviceDefault">
+
+        <service
+            android:name=".dataservices.DataStreamService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"
+            />
+
         <uses-library
             android:name="com.google.android.wearable"
             android:required="true" />
-        <uses-library
-            android:name="wear-sdk"
-            android:required="false" />
 
-        <!--
-               Set to true if your app is Standalone, that is, it does not require the handheld
-               app to run.
-        -->
+        <service
+            android:name=".tile.WatchfaceTileService"
+            android:label="@string/app_name"
+            android:permission="com.google.android.wearable.permission.BIND_TILE_PROVIDER"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="androidx.wear.tiles.action.BIND_TILE_PROVIDER" />
+            </intent-filter>
+            <meta-data
+                android:name="androidx.wear.tiles.PREVIEW"
+                android:resource="@drawable/watch_face_design" />
+        </service>
+
         <meta-data
             android:name="com.google.android.wearable.standalone"
             android:value="true" />
-
-        <service
-            android:name=".CustomWatchFaceService"
-            android:exported="true"
-            android:permission="android.permission.BIND_WALLPAPER"> <!--Allows user to customise the wallpaper-->
-
-            <intent-filter>
-                <action android:name="android.service.wallpaper.WallpaperService" />
-                <category android:name="com.google.android.wearable.watchface.category.WATCH_FACE" />
-            </intent-filter>
-
-            <meta-data
-                android:name="android.service.wallpaper"
-                android:resource="@xml/watchface" />
-
-            <property
-                android:name="androidx.wear.watchface.shared.WATCH_FACE_META_VERSION"
-                android:value="2" />
-        </service>
-
 
         <activity
             android:name=".presentation.MainActivity"
@@ -53,10 +49,20 @@
             android:theme="@style/MainActivityTheme.Starting">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
-
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-    </application>
 
+        <activity
+            android:name=".presentation.MetricDetailActivity"
+            android:exported="true"
+            android:label="Heart Rate Graph"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.example.honoursproject.HEART_RATE_GRAPH" >
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+    </application>
 </manifest>
