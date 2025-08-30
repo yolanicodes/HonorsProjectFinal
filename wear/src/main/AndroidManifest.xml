@@ -13,7 +13,18 @@
         android:label="@string/app_name"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.DeviceDefault">
-
+        <service
+            android:name=".tile.MainTileService"
+            android:label="Workout Tile"
+            android:exported="true"
+            android:permission="com.google.android.wearable.permission.BIND_TILE_PROVIDER">
+            <intent-filter>
+                <action android:name="androidx.wear.tiles.action.BIND_TILE_PROVIDER" />
+            </intent-filter>
+            <meta-data
+                android:name="androidx.wear.tiles.PREVIEW"
+                android:resource="@drawable/watch_face_design" />
+        </service>
         <service
             android:name=".dataservices.DataStreamService"
             android:enabled="true"
@@ -56,6 +67,7 @@
         <activity
             android:name=".presentation.MetricDetailActivity"
             android:exported="true"
+            android:theme="@style/Theme.App.Starting"
             android:label="Heart Rate Graph"
             android:launchMode="singleTask"
             android:taskAffinity="com.example.honoursproject.HEART_RATE_GRAPH" >

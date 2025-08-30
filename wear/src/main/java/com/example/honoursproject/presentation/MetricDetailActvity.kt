@@ -2,6 +2,7 @@ package com.example.honoursproject.presentation
 
 import android.content.Context
 import android.os.Bundle
+import androidx.compose.ui.graphics.Color
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -22,7 +23,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.wear.compose.material.CircularProgressIndicator
@@ -31,22 +31,39 @@ import com.example.honoursproject.R
 import com.example.honoursproject.dataservices.HealthDatabase
 import com.example.honoursproject.dataservices.SimulationManager
 import com.example.honoursproject.presentation.theme.*
+import com.example.honoursproject.CyclePhase
 import com.example.honoursproject.tile.WatchfaceTileService
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
-
 import kotlinx.coroutines.launch
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.concurrent.TimeUnit
 import kotlin.math.sin
+import com.example.honoursproject.presentation.theme.TILE_lutealPurple
+import com.example.honoursproject.presentation.theme.TILE_menstrualRed
+import com.example.honoursproject.presentation.theme.TILE_follicleGreen
+import com.example.honoursproject.presentation.theme.TILE_ovulationPink
+import com.example.honoursproject.presentation.theme.GrayInactive
 
 // --- Generic Data and State Classes (Moved to top-level) ---
 data class DataPoint(val time: Long, val value: Float)
-
+private fun getCycleColor(phase: CyclePhase): Color {
+    val menstrualRed= Color(0xFFFF0000)
+    val lutealPurple = Color(0xFF9C27B0)
+    val ovulationPink = Color(0xFFff66c4)
+    val follicleGreen = Color(0xFF4CAF50)
+    return when (phase) {
+        CyclePhase.MENSTRUATION -> menstrualRed
+        CyclePhase.FOLLICULAR -> follicleGreen
+        CyclePhase.OVULATION -> ovulationPink
+        CyclePhase.LUTEAL -> lutealPurple
+        else ->Color.Gray
+    }
+}
 data class GraphData(
     val dataPoints: List<DataPoint>,
     val minValue: Float,
@@ -56,22 +73,20 @@ data class GraphData(
 
 sealed class MetricUiState {
     object Loading : MetricUiState()
-    data class Success(val graphData: GraphData) : MetricUiState()
+    data class Success(val graphData: GraphData, val cycleDay: Int,
+                       val cyclePhase: String) : MetricUiState()
     data class Error(val message: String) : MetricUiState()
 }
 
 // --- ViewModel ---
 class MetricDetailViewModel(
-    savedStateHandle: SavedStateHandle,
+    val metricType: String,
     private val simulationManager: SimulationManager,
     private val context: Context
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow<MetricUiState>(MetricUiState.Loading)
     val uiState: StateFlow<MetricUiState> = _uiState.asStateFlow()
-
-    val metricType: String = savedStateHandle.get<String>(WatchfaceTileService.EXTRA_METRIC_TYPE)
-        ?: WatchfaceTileService.METRIC_HEART_RATE
 
     private val dao = HealthDatabase.getInstance(context).healthRecordDao()
 
@@ -102,16 +117,17 @@ class MetricDetailViewModel(
                     else -> 0f
                 }
 
-                dbData + DataPoint(time = System.currentTimeMillis(), value = liveValue) // Add the live value as a DataPoint
+                dbData + DataPoint(time = System.currentTimeMillis(), value = liveValue)
 
             }.collect{mergedData->
                 val minVal = mergedData.minOfOrNull { dp -> dp.value } ?: 0f
                 val maxVal = mergedData.maxOfOrNull { dp -> dp.value } ?: 0f
                 val latestVal = mergedData.lastOrNull()?.value ?: 0f
-
-                // Ensure mergedData is a List<DataPoint>
-                val graphData = GraphData(mergedData as List<DataPoint>, minVal, maxVal, latestVal)
-                _uiState.value = MetricUiState.Success(graphData)
+                val latestHealthRecord = simulationManager.healthDataStream.value
+                val cycleDay = latestHealthRecord.cycleDay // Get cycle day
+                val cyclePhase = latestHealthRecord.cyclePhase
+                val graphData = GraphData(mergedData, minVal, maxVal, latestVal)
+                _uiState.value = MetricUiState.Success(graphData,cycleDay,cyclePhase)
             }
         }
     }
@@ -119,18 +135,19 @@ class MetricDetailViewModel(
 
 // --- Activity ---
 class MetricDetailActivity : ComponentActivity() {
-    private val viewModel: MetricDetailViewModel by viewModels {
-        ViewModelFactory(this, this)
-    }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val metricType = intent?.getStringExtra(WatchfaceTileService.EXTRA_METRIC_TYPE)
+        val metricType = intent?.getStringExtra(WatchfaceTileService.EXTRA_METRIC_TYPE) ?: WatchfaceTileService.METRIC_HEART_RATE
+        val iconResId = intent?.getIntExtra("iconResId", R.drawable.heart_icon) ?: R.drawable.heart_icon // Get the icon ID
         Log.d("MetricDetailActivity", "Launched from tile with metricType = $metricType")
+
+        val viewModel by viewModels<MetricDetailViewModel> {
+            MetricDetailViewModelFactory(metricType, this.applicationContext)
+        }
         setContent {
             val uiState = viewModel.uiState.collectAsState().value
             MetricDetailScreen(
-                metricType = viewModel.metricType,
+                iconResId = iconResId,
                 state = uiState
             )
         }
@@ -139,22 +156,7 @@ class MetricDetailActivity : ComponentActivity() {
 
 // --- Composable Screens (Now Dynamic) ---
 @Composable
-fun MetricDetailScreen(metricType: String, state: MetricUiState) {
-    // Determine title and icon based on the metric type
-    val title = when (metricType) {
-        WatchfaceTileService.METRIC_HEART_RATE -> "Heart Rate"
-        WatchfaceTileService.METRIC_STEPS -> "Step Count"
-        WatchfaceTileService.METRIC_ENERGY -> "Energy Burned"
-        else -> "Metric Details"
-    }
-
-    val iconRes = when (metricType) {
-        WatchfaceTileService.METRIC_HEART_RATE -> R.drawable.heart_icon
-        WatchfaceTileService.METRIC_STEPS -> R.drawable.steps_icon
-        WatchfaceTileService.METRIC_ENERGY -> R.drawable.fire_icon
-        else -> R.drawable.heart_icon // Default icon
-    }
-
+fun MetricDetailScreen(iconResId: Int, state: MetricUiState) {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -170,16 +172,16 @@ fun MetricDetailScreen(metricType: String, state: MetricUiState) {
                 contentAlignment = Alignment.Center
             ) {
                 Image(
-                    painter = painterResource(id = iconRes),
-                    contentDescription = "$title Icon",
+                    painter = painterResource(id = iconResId),
+                    contentDescription = "Metric Icon",
                     modifier = Modifier.size(24.dp),
                     colorFilter = ColorFilter.tint(WhiteText)
                 )
             }
             Spacer(modifier = Modifier.height(4.dp))
-            Text(text = title, color = WhiteText, fontSize = 14.sp)
         }
 
+        // Graph Area
         // Graph Area
         Box(
             modifier = Modifier
@@ -189,7 +191,6 @@ fun MetricDetailScreen(metricType: String, state: MetricUiState) {
         ) {
             when (state) {
                 is MetricUiState.Loading -> {
-                    // Show a visual spinner instead of just text
                     CircularProgressIndicator(
                         modifier = Modifier.size(48.dp),
                         strokeWidth = 4.dp
@@ -217,6 +218,34 @@ fun MetricDetailScreen(metricType: String, state: MetricUiState) {
                         Text(text = timeLabel, color = WhiteText, fontSize = 12.sp)
                     }
                 }
+            }
+        }
+
+        // Cycle Information Row (NEW)
+        if (state is MetricUiState.Success) {
+            val cyclePhaseEnum = try {
+                CyclePhase.valueOf(state.cyclePhase.uppercase())
+            } catch (e: IllegalArgumentException) {
+                CyclePhase.UNKNOWN
+            }
+            val cycleColor = getCycleColor(cyclePhaseEnum)
+
+            Row(
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Image(
+                    painter = painterResource(id = R.drawable.cycle_icon),
+                    contentDescription = "Cycle Icon",
+                    modifier = Modifier.size(24.dp),
+                    colorFilter = ColorFilter.tint(cycleColor)
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+                Text(
+                    text = "Day ${state.cycleDay}",
+                    color = cycleColor,
+                    fontSize = 12.sp
+                )
             }
         }
     }
@@ -308,9 +337,11 @@ fun HeartRateDetailPreview() {
         maxValue = sampleDataPoints.maxOf { it.value },
         latestValue = sampleDataPoints.last().value
     )
+    val cycleDay=7
+    val cyclePhase="Follicular"
     MetricDetailScreen(
-        metricType = WatchfaceTileService.METRIC_HEART_RATE,
-        state = MetricUiState.Success(sampleGraphData)
+        state = MetricUiState.Success(sampleGraphData,cycleDay,cyclePhase),
+        iconResId = R.drawable.heart_icon
     )
 }
 
@@ -326,8 +357,10 @@ fun StepsDetailPreview() {
         maxValue = sampleDataPoints.maxOf { it.value },
         latestValue = sampleDataPoints.last().value
     )
+    val cycleDay=7
+    val cyclePhase="Follicular"
     MetricDetailScreen(
-        metricType = WatchfaceTileService.METRIC_STEPS,
-        state = MetricUiState.Success(sampleGraphData)
+        state = MetricUiState.Success(sampleGraphData,cycleDay,cyclePhase),
+        iconResId = R.drawable.heart_icon
     )
 }

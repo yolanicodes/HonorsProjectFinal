@@ -1,4 +1,4 @@
-/*package com.example.honoursproject.tile
+package com.example.honoursproject.tile
 
 import android.content.Context
 import androidx.compose.runtime.Composable
@@ -33,15 +33,12 @@ import com.example.honoursproject.presentation.theme.TILE_ovulationPink
 import kotlinx.coroutines.flow.first
 import java.time.LocalDate
 
-private const val RESOURCES_VERSION = "0"
+//private const val RESOURCES_VERSION = "0"
 
 data class MenstrualCycleInfo(val phase: CyclePhase, val dayOfCycle: Int)
 
 @OptIn(ExperimentalHorologistApi::class)
 class MainTileService : SuspendingTileService() {
-
-    // Create a single instance of SimulationService
-    val simulationService by lazy { SimulationManager(this) }
 
     override suspend fun resourcesRequest(
         requestParams: RequestBuilders.ResourcesRequest
@@ -87,7 +84,7 @@ class MainTileService : SuspendingTileService() {
             TimelineBuilders.TimelineEntry.Builder().setLayout(
                 LayoutElementBuilders.Layout.Builder().setRoot(
                     // Pass the device parameters to the layout function
-                    workoutTileLayout(this, requestParams.deviceParameters!!, cycleInfo)
+                    workoutTileLayout(this, requestParams.deviceConfiguration, cycleInfo)
                 ).build()
             ).build()
         ).build()
@@ -100,10 +97,10 @@ class MainTileService : SuspendingTileService() {
     private suspend fun getMenstrualCycleInfo(): MenstrualCycleInfo {
         return try {
             // Get the current health data from the simulation service
-            val healthData = simulationService.healthDataStream.first()
+            val healthData = SimulationManager.healthDataStream.first()
 
             // Convert the cycle phase string to CyclePhase enum
-            val phase = when (healthData.cyclePhase?.lowercase()) {
+            val phase = when (healthData.cyclePhase.lowercase()) {
                 "menstruation", "menstrual" -> CyclePhase.MENSTRUATION
                 "follicular" -> CyclePhase.FOLLICULAR
                 "ovulation", "ovulatory" -> CyclePhase.OVULATION
@@ -112,10 +109,10 @@ class MainTileService : SuspendingTileService() {
             }
 
             // Use the cycle day from the health data, or default to 1 if not available
-            val dayOfCycle = healthData.cycleDay ?: 1
+            val dayOfCycle = healthData.cycleDay
 
             MenstrualCycleInfo(phase, dayOfCycle)
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             // Fallback to the original simulation if there's an error
             val dayOfYear = LocalDate.now().dayOfYear
             val cycleDay = (dayOfYear % 28) + 1
@@ -130,23 +127,9 @@ class MainTileService : SuspendingTileService() {
     }
 }
 
-// Extension function to start simulation service if needed
-suspend fun MainTileService.ensureSimulationStarted(csvFileName: String = "P102-Health_Data_Processed.csv") {
-    // You might want to check if simulation is already running
-    // This is a simple approach - you could add more sophisticated state management
-    try {
-        simulationService.startStreaming(csvFileName)
-    } catch (e: Exception) {
-        // Handle error - simulation might already be running or file not found
-        e.printStackTrace()
-    }
-}
-
-// Renamed from 'tileLayout' to 'workoutTileLayout'
-// for clarity, and accepts deviceParameters
 private fun workoutTileLayout(
     context: Context,
-    deviceParameters: androidx.wear.tiles.DeviceParametersBuilders.DeviceParameters,
+    deviceParameters: DeviceParametersBuilders.DeviceParameters,
     cycleInfo: MenstrualCycleInfo
 ): LayoutElementBuilders.LayoutElement {
 
@@ -337,8 +320,8 @@ private fun workoutTileLayout(
 )
 @Composable
 fun TilePreview() {
-    val context = LocalContext.current
-    val deviceParameters = DeviceParametersBuilders.DeviceParameters.Builder()
+    LocalContext.current
+    DeviceParametersBuilders.DeviceParameters.Builder()
         .setScreenHeightDp(200)
         .setScreenWidthDp(200)
         .setScreenDensity(1.5f)
@@ -346,10 +329,10 @@ fun TilePreview() {
         .build()
 
     // In a real app, you might want to create a sample cycleInfo object for previewing.
-    val sampleCycleInfo = MenstrualCycleInfo(CyclePhase.OVULATION, 14)
+    MenstrualCycleInfo(CyclePhase.OVULATION, 14)
 
     // TODO: Update preview method as LayoutRootPreview is deprecated.
     // For now, you can test the layout by running the tile on an emulator/device.
     // To preview this specific layout, you would call:
     // LayoutRootPreview(root = workoutTileLayout(context, deviceParameters, sampleCycleInfo))
-}*/
+}

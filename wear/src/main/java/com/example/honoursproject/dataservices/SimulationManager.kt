@@ -26,17 +26,22 @@ object SimulationManager {
     private var simulationJob: Job? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    private var cumulativeSteps = 0
+    private var cumulativeEnergy = 0.0
+    private var currentSimulationDay: Int = -1
     private var lastKnownRecord = HealthDataRecord()
     private var currentIndex: Int = 0
     private var dataLines: List<String> = emptyList()
 
     fun startStreaming(context: Context, csvFileName: String) {
-        if (simulationJob?.isActive == true) return // Already running
+        if (simulationJob?.isActive == true) return
 
         simulationJob = scope.launch {
             try {
+                cumulativeSteps = 0
+                cumulativeEnergy = 0.0
                 val allLines = context.assets.open(csvFileName).bufferedReader().readLines()
-                if (allLines.size <=1){
+                if (allLines.size <= 1) {
                     println("Only header is being read.")
                     return@launch
                 }
@@ -49,8 +54,6 @@ object SimulationManager {
                 currentIndex = lastIndex.coerceAtMost(allLines.size - 1)
                 Log.i("SimulationManager", "Starting/resuming simulation from index: $currentIndex")
 
-
-
                 val header = allLines.first()
                 dataLines = allLines.drop(1)
                 val columnIndexMap = header.split(',')
@@ -59,35 +62,54 @@ object SimulationManager {
 
                 val formatter = DateTimeFormatter.ofPattern("yyyy/MM/dd HH:mm:ss")
                 val systemNow = LocalDateTime.now()
-                Log.i("SimulationManager", "Current system time for alignment: $systemNow")
-                    // --- 2. Align to system clock ---
-                    var bestMatchIdx = -1
 
+                var bestMatchIdx = -1
                 dataLines.forEachIndexed { idx, line ->
                     val parts = line.split(',')
                     try {
-                        val recordTime = LocalDateTime.parse(parts[startTimeIndex], formatter)
-                            .withYear(systemNow.year)
-                            .withMonth(systemNow.monthValue)
-                            .withDayOfMonth(systemNow.dayOfMonth)
-
-                        // Find the latest record that is not in the future
-                        if (!recordTime.isAfter(systemNow)) {
-                            bestMatchIdx = idx
+                        val originalRecordTime = LocalDateTime.parse(parts[startTimeIndex], formatter)
+                        val dateMatches = originalRecordTime.dayOfMonth == systemNow.dayOfMonth &&
+                                originalRecordTime.monthValue == systemNow.monthValue
+                        if (dateMatches) {
+                            val recordTimeForComparison = originalRecordTime.withYear(systemNow.year)
+                            if (!recordTimeForComparison.isAfter(systemNow)) {
+                                bestMatchIdx = idx
+                            }
                         }
                     } catch (_: Exception) { }
                 }
+                if (bestMatchIdx == -1) {
+                    Log.w("SimulationManager", "No matching record for today. Falling back.")
+                    dataLines.forEachIndexed { idx, line ->
+                        val parts = line.split(',')
+                        try {
+                            val recordTime = LocalDateTime.parse(parts[startTimeIndex], formatter)
+                                .withYear(systemNow.year)
+                            if (!recordTime.isAfter(systemNow)) {
+                                bestMatchIdx = idx
+                            }
+                        } catch (_: Exception) { }
+                    }
+                }
 
-                currentIndex = if(bestMatchIdx >= 0)
-                        bestMatchIdx// latest <= now
-                        else 0                        // fallback
+                currentIndex = if (bestMatchIdx >= 0) bestMatchIdx else 0
                 Log.i("SimulationManager", "Using index $currentIndex")
 
                 var previousRecordTime: LocalDateTime? = null
+                try {
+                    val initialLine = dataLines[currentIndex]
+                    val initialValues = initialLine.split(',')
+                    val initialTime = LocalDateTime.parse(initialValues[startTimeIndex], formatter)
+                    val initialRecord = parseRecord(initialValues, columnIndexMap, lastKnownRecord)
+
+                    currentSimulationDay = initialTime.dayOfMonth
+                    Log.i("SimulationManager", "Initial baseline set for day $currentSimulationDay")
+                } catch (e: Exception) {
+                    Log.e("SimulationManager", "Failed to set initial baseline", e)
+                }
 
                 val shortTermDb = HealthDatabase.getInstance(context)
                 val shortTermDao = shortTermDb.healthRecordDao()
-
                 val archiveDb = ArchiveDatabase.getInstance(context)
                 val archiveDao = archiveDb.archiveRecordDao()
 
@@ -102,28 +124,41 @@ object SimulationManager {
                             .withMonth(LocalDateTime.now().monthValue)
                             .withDayOfMonth(LocalDateTime.now().dayOfMonth)
                     } catch (e: Exception) {
-                        Log.e("SimulationManager", "Error parsing time from line: $line", e)
+                        Log.e("SimulationManager", "Error parsing time", e)
                         null
                     }
 
                     if (currentRecordTime != null) {
-                        val delayMillis = if (previousRecordTime == null) {
-                            0L//start immediately
-                        } else {
-                            ChronoUnit.MILLIS.between(previousRecordTime, currentRecordTime).coerceAtLeast(0)
+                        if (currentRecordTime.dayOfMonth != currentSimulationDay) {
+                            currentSimulationDay = currentRecordTime.dayOfMonth
+                            cumulativeSteps = 0
+                            cumulativeEnergy = 0.0
+                            Log.i("SimulationManager", "New day detected. Resetting cumulative totals.")
                         }
+
+                        val delayMillis = if (previousRecordTime == null) 0L else
+                            ChronoUnit.MILLIS.between(previousRecordTime, currentRecordTime).coerceAtLeast(0)
                         Log.d("SimulationManager", "Calculated delay: $delayMillis ms")
                         delay(delayMillis)
 
                         if (isActive) {
                             val newRecord = parseRecord(values, columnIndexMap, lastKnownRecord)
+
+                            // Track cumulative values separately
+                            val stepDifference = newRecord.stepCount - lastKnownRecord.stepCount
+                            if (stepDifference > 0) cumulativeSteps += stepDifference
+
+                            val energyDifference = newRecord.activeEnergyBurned - lastKnownRecord.activeEnergyBurned
+                            if (energyDifference > 0) cumulativeEnergy += energyDifference
+
+                            // Emit raw record (not cumulative)
                             _healthDataStream.value = newRecord
                             lastKnownRecord = newRecord
                             previousRecordTime = currentRecordTime
-                            val timestamp = System.currentTimeMillis()
-                            Log.i("SimulationManager", "Emitting new record -> HeartRate: ${newRecord.heartRate}, StepCount: ${newRecord.stepCount}")
 
-                            //Insert asynchronously (non-blocking)
+                            val timestamp = System.currentTimeMillis()
+                            Log.i("SimulationManager", "Emitting new record -> HR: ${newRecord.heartRate}, Steps: ${newRecord.stepCount}")
+
                             scope.launch {
                                 try {
                                     shortTermDao.insert(
@@ -140,15 +175,13 @@ object SimulationManager {
                                             basalBodyTemperature = newRecord.basalBodyTemperature
                                         )
                                     )
-
-                                    // Cleanup: delete old rows
                                     val cutoff = timestamp - TimeUnit.HOURS.toMillis(3)
                                     shortTermDao.deleteOlderThan(cutoff)
-                            }catch (e: Exception){
-                                    Log.e("SimulationManager", "Failed to insert record into short-term DB", e)
+                                } catch (e: Exception) {
+                                    Log.e("SimulationManager", "Failed to insert record", e)
                                 }
-
                             }
+
                             scope.launch {
                                 try {
                                     archiveDao.insert(
@@ -165,22 +198,18 @@ object SimulationManager {
                                             basalBodyTemperature = newRecord.basalBodyTemperature
                                         )
                                     )
-                                }catch (e:Exception){
-                                    Log.e("SimulationManager", "Failed to insert record into archive DB", e)
+                                } catch (e: Exception) {
+                                    Log.e("SimulationManager", "Failed to insert archive record", e)
                                 }
-
                             }
-                            context.simulationDataStore.edit { prefs ->prefs[KEY_INDEX] = currentIndex}
+                            context.simulationDataStore.edit { prefs -> prefs[KEY_INDEX] = currentIndex }
                         }
                     }
-
                     currentIndex = (currentIndex + 1) % dataLines.size
                     if (currentIndex == 0) previousRecordTime = null
                 }
-
             } catch (e: IOException) {
-                Log.e("SimulationManager", "Error reading CSV file: ${e.message}", e)
-                e.printStackTrace()
+                Log.e("SimulationManager", "Error reading CSV", e)
             }
         }
     }
@@ -189,6 +218,9 @@ object SimulationManager {
         simulationJob?.cancel()
         simulationJob = null
     }
+
+    fun getCumulativeSteps(): Int = cumulativeSteps
+    fun getCumulativeEnergy(): Double = cumulativeEnergy
 
     private fun parseRecord(
         values: List<String>,

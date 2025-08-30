@@ -1,6 +1,7 @@
 package com.example.honoursproject.presentation
 
 import android.Manifest
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
@@ -27,6 +28,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.wear.compose.material.*
 import com.example.honoursproject.dataservices.DataStreamService
+import com.example.honoursproject.dataservices.WorkoutSimulationManager
 import com.example.honoursproject.presentation.theme.HonoursProjectTheme
 import com.example.honoursproject.presentation.theme.backgroundBlue
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -36,7 +38,7 @@ import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.launch
 
 // --- DataStore setup ---
-val ComponentActivity.setupDataStore by preferencesDataStore(name = "setup_prefs")
+val Context.setupDataStore by preferencesDataStore(name = "setup_prefs")
 
 object SetupPreferences {
     val IS_COMPLETE = booleanPreferencesKey("is_setup_complete")
@@ -140,6 +142,10 @@ class MainActivity : ComponentActivity() {
     private fun startForegroundService() {
         val serviceIntent = Intent(this, DataStreamService::class.java)
         ContextCompat.startForegroundService(this, serviceIntent)
+        viewModel._isLoading.value = false
+
+        WorkoutSimulationManager.startMonitoring(this, "workoutdata.csv")
+
         viewModel._isLoading.value = false
     }
     override fun onCreate(savedInstanceState: Bundle?) {

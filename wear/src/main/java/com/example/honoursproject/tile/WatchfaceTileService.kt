@@ -3,6 +3,7 @@ package com.example.honoursproject.tile
 import android.content.ContentValues.TAG
 import android.content.Context
 import android.content.Intent
+import android.graphics.Color
 import android.util.Log
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.platform.LocalContext
@@ -33,6 +34,10 @@ import com.example.honoursproject.presentation.theme.TILE_follicleGreen
 import com.example.honoursproject.presentation.theme.TILE_lutealPurple
 import com.example.honoursproject.presentation.theme.TILE_menstrualRed
 import com.example.honoursproject.presentation.theme.TILE_ovulationPink
+import com.example.honoursproject.tile.WatchfaceTileService.Companion.ID_ENERGY_ICON
+import com.example.honoursproject.tile.WatchfaceTileService.Companion.ID_STEPS_ICON
+import com.example.honoursproject.tile.WatchfaceTileService.Companion.METRIC_ENERGY
+import com.example.honoursproject.tile.WatchfaceTileService.Companion.METRIC_STEPS
 import com.google.android.horologist.annotations.ExperimentalHorologistApi
 import com.google.android.horologist.tiles.SuspendingTileService
 import kotlinx.coroutines.CoroutineScope
@@ -164,13 +169,13 @@ private fun tileLayout(
                 .addContent(Spacer.Builder().setHeight(DimensionBuilders.weight(1f)).build())
                 .addContent(
                     Row.Builder()
-                        .setWidth(DimensionBuilders.wrap()) // Use wrap() to allow centering
+                        .setWidth(DimensionBuilders.wrap())
                         .setVerticalAlignment(LayoutElementBuilders.VERTICAL_ALIGN_CENTER)
                         .addContent(
                             Column.Builder()
                                 .setWidth(DimensionBuilders.wrap())
                                 .setHorizontalAlignment(LayoutElementBuilders.HORIZONTAL_ALIGN_CENTER)
-                                .addContent(metricColumn(context, WatchfaceTileService.METRIC_HEART_RATE, WatchfaceTileService.ID_HEART_ICON, healthData.heartRate.toInt().toString()))
+                                .addContent(metricColumn(context, WatchfaceTileService.METRIC_HEART_RATE, WatchfaceTileService.ID_HEART_ICON, R.drawable.heart_icon, healthData.heartRate.toInt().toString()))
                                 .addContent(Spacer.Builder().setHeight(DimensionBuilders.dp(16f)).build())
                                 .addContent(cycleInfoIcon(context, healthData.cycleDay, cycleColor))
                                 .build()
@@ -182,9 +187,9 @@ private fun tileLayout(
                             Column.Builder()
                                 .setWidth(DimensionBuilders.wrap())
                                 .setHorizontalAlignment(LayoutElementBuilders.HORIZONTAL_ALIGN_CENTER)
-                                .addContent(metricColumn(context, WatchfaceTileService.METRIC_STEPS, WatchfaceTileService.ID_STEPS_ICON, healthData.stepCount.toString()))
+                                .addContent(metricColumn(context, METRIC_STEPS, ID_STEPS_ICON, R.drawable.steps_icon, SimulationManager.getCumulativeSteps().toString()))
                                 .addContent(Spacer.Builder().setHeight(DimensionBuilders.dp(16f)).build())
-                                .addContent(metricColumn(context, WatchfaceTileService.METRIC_ENERGY, WatchfaceTileService.ID_ENERGY_ICON, healthData.activeEnergyBurned.toInt().toString()))
+                                .addContent(metricColumn(context, METRIC_ENERGY, ID_ENERGY_ICON, R.drawable.fire_icon, String.format("%.2f", SimulationManager.getCumulativeEnergy())))
                                 .build()
                         )
                         .build()
@@ -195,7 +200,7 @@ private fun tileLayout(
         .build()
 }
 
-private fun clickableForMetric(context: Context, metricType: String): ModifiersBuilders.Clickable {
+private fun clickableForMetric(context: Context, metricType: String,iconResId: Int): ModifiersBuilders.Clickable {
     return ModifiersBuilders.Clickable.Builder()
         .setId(metricType)
         .setOnClick(
@@ -207,6 +212,10 @@ private fun clickableForMetric(context: Context, metricType: String): ModifiersB
                         .addKeyToExtraMapping(
                             WatchfaceTileService.EXTRA_METRIC_TYPE,
                             ActionBuilders.AndroidStringExtra.Builder().setValue(metricType).build()
+                        )
+                        .addKeyToExtraMapping(
+                            "iconResId",
+                            ActionBuilders.AndroidIntExtra.Builder().setValue(iconResId).build()
                         )
                         .build()
                 )
@@ -234,7 +243,7 @@ private fun dateHeader(context: Context, time: ZonedDateTime): LayoutElementBuil
         .addContent(
             Text.Builder(context, time.format(DateTimeFormatter.ofPattern("dd MMMM")))
                 .setTypography(Typography.TYPOGRAPHY_CAPTION1)
-                .setColor(ColorBuilders.argb(android.graphics.Color.WHITE))
+                .setColor(ColorBuilders.argb(Color.WHITE))
                 .build()
         )
         .build()
@@ -246,13 +255,13 @@ private fun timeDisplay(context: Context, time: ZonedDateTime): LayoutElementBui
         .addContent(
             Text.Builder(context, time.format(DateTimeFormatter.ofPattern("HH")))
                 .setTypography(Typography.TYPOGRAPHY_DISPLAY2)
-                .setColor(ColorBuilders.argb(android.graphics.Color.WHITE))
+                .setColor(ColorBuilders.argb(Color.WHITE))
                 .build()
         )
         .addContent(
             Text.Builder(context, time.format(DateTimeFormatter.ofPattern("mm")))
                 .setTypography(Typography.TYPOGRAPHY_DISPLAY2)
-                .setColor(ColorBuilders.argb(android.graphics.Color.WHITE))
+                .setColor(ColorBuilders.argb(Color.WHITE))
                 .build()
         )
         .build()
@@ -262,13 +271,14 @@ private fun metricColumn(
     context: Context,
     metricType: String,
     iconId: String,
+    iconResId: Int,
     value: String
 ): LayoutElementBuilders.LayoutElement {
     return Column.Builder()
         .setHorizontalAlignment(LayoutElementBuilders.HORIZONTAL_ALIGN_CENTER)
         .setModifiers(
             ModifiersBuilders.Modifiers.Builder()
-                .setClickable(clickableForMetric(context, metricType))
+                .setClickable(clickableForMetric(context, metricType, iconResId))
                 .build()
         )
         .addContent(
@@ -282,7 +292,7 @@ private fun metricColumn(
         .addContent(
             Text.Builder(context, value)
                 .setTypography(Typography.TYPOGRAPHY_BODY2)
-                .setColor(ColorBuilders.argb(android.graphics.Color.WHITE))
+                .setColor(ColorBuilders.argb(Color.WHITE))
                 .build()
         )
         .build()
@@ -293,7 +303,10 @@ private fun cycleInfoIcon(context: Context, cycleDay: Int, color: ColorBuilders.
         .setHorizontalAlignment(LayoutElementBuilders.HORIZONTAL_ALIGN_CENTER)
         .setModifiers(
             ModifiersBuilders.Modifiers.Builder()
-                .setClickable(clickableForMetric(context, WatchfaceTileService.METRIC_CYCLE))
+                .setClickable(clickableForMetric(
+                    context, WatchfaceTileService.METRIC_CYCLE,
+                    iconResId = R.drawable.cycle_icon
+                ))
                 .build()
         )
         .addContent(
@@ -319,7 +332,7 @@ private fun getCycleColor(phase: CyclePhase): ColorBuilders.ColorProp = when (ph
     CyclePhase.FOLLICULAR -> TILE_follicleGreen
     CyclePhase.OVULATION -> TILE_ovulationPink
     CyclePhase.LUTEAL -> TILE_lutealPurple
-    else -> ColorBuilders.argb(android.graphics.Color.GRAY)
+    else -> ColorBuilders.argb(Color.GRAY)
 }
 
 @Preview(

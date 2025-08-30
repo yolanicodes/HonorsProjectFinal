@@ -7,17 +7,20 @@ import androidx.wear.protolayout.ColorBuilders
 
 //ALL APP COLOURS
 val backgroundBlue = Color(0xFF212a3a)
-val ovulationPink = Color(0xFFff66c4)
+
 val iconBlue = Color(0xFF41b8d5)
 val WhiteText = Color(0xFFFFFFFF)
 val GrayInactive = Color(0xFF9E9E9E)
 val menstrualRed= Color(0xFFFF0000)
+val lutealPurple = Color(0xFF9C27B0)
+val ovulationPink = Color(0xFFff66c4)
+val follicleGreen = Color(0xFF4CAF50)
 val YellowHZ = Color(0xFFFFbd59)
 val OrangeHZ = Color(0xFFd97638)
 val darkBlueHZ=Color(0xFF004aad)
 val CyanHZ = Color(0xFF5ce1e6)
-val lutealPurple = Color(0xFF9C27B0)
-val follicleGreen = Color(0xFF4CAF50)
+
+
 val maroonHZ=Color(0xff800000)
 
 //Convert Compose colors to tile colors
