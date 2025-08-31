@@ -144,7 +144,7 @@ class MainActivity : ComponentActivity() {
         ContextCompat.startForegroundService(this, serviceIntent)
         viewModel._isLoading.value = false
 
-        WorkoutSimulationManager.startMonitoring(this, "workoutdata.csv")
+        WorkoutSimulationManager.startMonitoring(this, "P102-Workout_Data.csv")
 
         viewModel._isLoading.value = false
     }
