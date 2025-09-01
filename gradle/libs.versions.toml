@@ -33,6 +33,8 @@ watchface = "1.2.1"
 tilesToolingPreview = "1.5.0"
 ksp="2.2.0-2.0.2"
 firebaseCrashlyticsBuildtools = "3.0.6"
+navigationComposeJvmstubs = "2.9.3"
+navigationComposeAndroid = "2.9.3"
 
 [libraries]
 androidx-activity-ktx = { module = "androidx.wear.activity:activity-ktx", version.ref = "activityKtx" }
@@ -81,6 +83,8 @@ androidx-compose-ui-tooling = { group = "androidx.compose.ui", name = "ui-toolin
 androidx-compose-ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-tooling-preview" }
 androidx-tiles-tooling-preview = { group = "androidx.wear.tiles", name = "tiles-tooling-preview", version.ref = "tilesToolingPreview" }
 firebase-crashlytics-buildtools = { group = "com.google.firebase", name = "firebase-crashlytics-buildtools", version.ref = "firebaseCrashlyticsBuildtools" }
+androidx-navigation-compose-jvmstubs = { group = "androidx.navigation", name = "navigation-compose-jvmstubs", version.ref = "navigationComposeJvmstubs" }
+androidx-navigation-compose-android = { group = "androidx.navigation", name = "navigation-compose-android", version.ref = "navigationComposeAndroid" }
 
 
 [plugins]

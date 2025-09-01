@@ -30,8 +30,11 @@ import com.example.honoursproject.presentation.theme.TILE_iconBlue
 import com.example.honoursproject.presentation.theme.TILE_lutealPurple
 import com.example.honoursproject.presentation.theme.TILE_menstrualRed
 import com.example.honoursproject.presentation.theme.TILE_ovulationPink
-import kotlinx.coroutines.flow.first
-import java.time.LocalDate
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 //private const val RESOURCES_VERSION = "0"
 
@@ -39,6 +42,8 @@ data class MenstrualCycleInfo(val phase: CyclePhase, val dayOfCycle: Int)
 
 @OptIn(ExperimentalHorologistApi::class)
 class MainTileService : SuspendingTileService() {
+    override val serviceScope = CoroutineScope(SupervisorJob() +Dispatchers.IO)
+    private var dataCollectionJob: Job? = null
 
     override suspend fun resourcesRequest(
         requestParams: RequestBuilders.ResourcesRequest
@@ -78,7 +83,7 @@ class MainTileService : SuspendingTileService() {
     override suspend fun tileRequest(
         requestParams: TileRequest
     ): TileBuilders.Tile {
-        // Get cycle info from SimulationService instead of hardcoded values
+        SimulationManager.startStreaming(this, "P102-Health_Data_Processed.csv")
         val cycleInfo = getMenstrualCycleInfo()
         val singleTileTimeline = TimelineBuilders.Timeline.Builder().addTimelineEntry(
             TimelineBuilders.TimelineEntry.Builder().setLayout(
@@ -92,38 +97,30 @@ class MainTileService : SuspendingTileService() {
         return TileBuilders.Tile.Builder().setResourcesVersion(RESOURCES_VERSION)
             .setTileTimeline(singleTileTimeline).build()
     }
+    override fun onCreate() {
+        super.onCreate()
+        //  Just observe SimulationManager
+        dataCollectionJob = serviceScope.launch {
+            SimulationManager.healthDataStream.collect {
+                // Request UI refresh whenever data updates
+                getUpdater(this@MainTileService).requestUpdate(MainTileService::class.java)
+            }
+        }
+
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        dataCollectionJob?.cancel()
+    }
 
     // Modified to use SimulationService data
-    private suspend fun getMenstrualCycleInfo(): MenstrualCycleInfo {
-        return try {
-            // Get the current health data from the simulation service
-            val healthData = SimulationManager.healthDataStream.first()
-
-            // Convert the cycle phase string to CyclePhase enum
-            val phase = when (healthData.cyclePhase.lowercase()) {
-                "menstruation", "menstrual" -> CyclePhase.MENSTRUATION
-                "follicular" -> CyclePhase.FOLLICULAR
-                "ovulation", "ovulatory" -> CyclePhase.OVULATION
-                "luteal" -> CyclePhase.LUTEAL
-                else -> CyclePhase.UNKNOWN
-            }
-
-            // Use the cycle day from the health data, or default to 1 if not available
-            val dayOfCycle = healthData.cycleDay
-
-            MenstrualCycleInfo(phase, dayOfCycle)
-        } catch (_: Exception) {
-            // Fallback to the original simulation if there's an error
-            val dayOfYear = LocalDate.now().dayOfYear
-            val cycleDay = (dayOfYear % 28) + 1
-            val phase = when {
-                cycleDay <= 5 -> CyclePhase.MENSTRUATION
-                cycleDay <= 13 -> CyclePhase.FOLLICULAR
-                cycleDay <= 15 -> CyclePhase.OVULATION
-                else -> CyclePhase.LUTEAL
-            }
-            MenstrualCycleInfo(phase, cycleDay)
-        }
+    private fun getMenstrualCycleInfo(): MenstrualCycleInfo {
+            val healthData = SimulationManager.healthDataStream.value
+            return MenstrualCycleInfo(
+                phase = CyclePhase.valueOf(healthData.cyclePhase.uppercase()),
+                dayOfCycle = healthData.cycleDay
+            )
     }
 }
 

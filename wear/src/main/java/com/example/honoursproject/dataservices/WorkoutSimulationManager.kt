@@ -8,13 +8,10 @@ import android.os.Build
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.example.honoursproject.R
-import com.example.honoursproject.presentation.SetupPreferences
 import com.example.honoursproject.presentation.WorkoutActivity
-import com.example.honoursproject.presentation.setupDataStore
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.first
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import java.time.temporal.ChronoUnit
@@ -28,14 +25,18 @@ data class WorkoutDetails(
     val distance: Double,
     val avgHeartRate: Double,
     val activeEnergy: Double,
-    val basalEnergy: Double
+    val basalEnergy: Double,
+    val maxHeartRate: Double,
+    val totalEnergyBurned: Double
 )
 
 // Data class for the final summary
 data class WorkoutSummary(
     val details: WorkoutDetails,
     val cyclePhase: String?,
-    val cycleDay: Int?
+    val cycleDay: Int?,
+    val dayOfCycle: Int,
+    val heartZones: Map<Int, Long>
 )
 
 // Represents the state of the workout simulation
@@ -95,7 +96,11 @@ object WorkoutSimulationManager {
 
                 // Fetch latest health data for the summary
                 val healthData = SimulationManager.healthDataStream.value
-                val summary = WorkoutSummary(workout, healthData.cyclePhase, healthData.cycleDay)
+                val summary = WorkoutSummary(
+                    workout, healthData.cyclePhase, healthData.cycleDay,
+                    dayOfCycle = TODO(),
+                    heartZones = TODO(),
+                )
                 _workoutState.value = WorkoutState.Finished(summary)
                 Log.i("WorkoutSimManager", "Workout finished. Summary generated.")
             } else {
@@ -130,12 +135,17 @@ object WorkoutSimulationManager {
                             WorkoutDetails(
                                 workoutType = values[header.getValue("workoutActivityType")],
                                 startTime = startTime,
-                                endTime = LocalDateTime.parse(values[header.getValue("endDate")], formatter),
+                                endTime = LocalDateTime.parse(
+                                    values[header.getValue("endDate")],
+                                    formatter
+                                ),
                                 duration = values[header.getValue("duration")].toDouble(),
                                 distance = values[header.getValue("distance")].toDouble(),
                                 avgHeartRate = values[header.getValue("AverageHeartRate")].toDouble(),
                                 activeEnergy = values[header.getValue("activeEnergyBurned")].toDouble(),
-                                basalEnergy = values[header.getValue("basalEnergyBurned")].toDouble()
+                                basalEnergy = values[header.getValue("basalEnergyBurned")].toDouble(),
+                                maxHeartRate = TODO(),
+                                totalEnergyBurned = TODO(),
                             )
                         } else null
                     } catch (e: Exception) {

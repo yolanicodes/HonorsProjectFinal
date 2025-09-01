@@ -5,6 +5,8 @@ import android.util.Log
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.example.honoursproject.presentation.SetupPreferences
+import com.example.honoursproject.presentation.setupDataStore
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import java.io.IOException
@@ -17,6 +19,9 @@ import java.util.concurrent.TimeUnit
 val Context.simulationDataStore by preferencesDataStore(name = "simulation_prefs")
 
 object SimulationManager {
+
+    // Hardcoded max heart rate as requested.
+    const val MAX_HEART_RATE = 220
 
     private val KEY_INDEX = intPreferencesKey("csv_index")
 
@@ -32,6 +37,17 @@ object SimulationManager {
     private var lastKnownRecord = HealthDataRecord()
     private var currentIndex: Int = 0
     private var dataLines: List<String> = emptyList()
+
+
+    // NEW: Function to get the user's age from DataStore
+    suspend fun getUserAge(context: Context): Int {
+        return context.setupDataStore.data
+            .map { preferences ->
+                preferences[SetupPreferences.AGE] ?: 25 // Default to 25 if not set
+            }
+            .first()
+    }
+
 
     fun startStreaming(context: Context, csvFileName: String) {
         if (simulationJob?.isActive == true) return
