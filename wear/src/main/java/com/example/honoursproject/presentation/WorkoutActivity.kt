@@ -47,8 +47,6 @@ import java.time.temporal.ChronoUnit
 import java.util.concurrent.TimeUnit
 import kotlin.math.roundToInt
 
-// --- Enums and Data Classes ---
-// Remove the duplicate CyclePhase enum - use the one from com.example.honoursproject.CyclePhase
 
 // Helper function to get cycle phase color
 private fun getCyclePhaseColor(phase: CyclePhase): Color {
@@ -369,20 +367,20 @@ fun WorkoutScreen(
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.SpaceAround,
-            modifier = Modifier.fillMaxSize().padding(vertical = 16.dp)
+            modifier = Modifier.fillMaxSize().padding(12.dp)
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 val icon = if (workoutType.contains("walk", ignoreCase = true)) R.drawable.steps_icon else R.drawable.run_icon
                 Image(
                     painterResource(id = icon),
                     contentDescription = null,
-                    modifier = Modifier.size(28.dp),
+                    modifier = Modifier.size(20.dp),
                     colorFilter = ColorFilter.tint(WhiteText)
                 )
-                Spacer(Modifier.width(8.dp))
+                Spacer(Modifier.width(6.dp))
                 Text(
                     formatElapsedTime(elapsedTime),
-                    fontSize = 32.sp,
+                    fontSize = 28.sp,
                     fontWeight = FontWeight.Bold,
                     color = WhiteText
                 )
@@ -390,7 +388,7 @@ fun WorkoutScreen(
 
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 HeartRateZones(currentZone)
-                Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(4.dp))
                 MetricRow(
                     iconRes = R.drawable.heart_icon,
                     label = "BPM",
@@ -402,29 +400,29 @@ fun WorkoutScreen(
 
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.Center,
-                modifier = Modifier.fillMaxWidth()
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp) // Slightly reduced padding
             ) {
                 MetricColumn(label = "KCAL", value = energy.toString())
-                Spacer(Modifier.width(16.dp))
                 MetricColumn(label = "KM", value = String.format("%.2f", distance))
-                Spacer(Modifier.width(16.dp))
+
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Image(
                         painterResource(id = R.drawable.cycle_icon),
                         contentDescription = null,
-                        modifier = Modifier.size(24.dp),
-                        colorFilter = ColorFilter.tint(getCyclePhaseColor(cycleInfo.phase)) // Use helper function
+                        modifier = Modifier.size(18.dp), // Slightly reduced icon size
+                        colorFilter = ColorFilter.tint(getCyclePhaseColor(cycleInfo.phase))
                     )
                     Spacer(Modifier.width(4.dp))
                     Text(
                         text = cycleInfo.dayOfCycle.toString(),
-                        fontSize = 18.sp,
-                        color = getCyclePhaseColor(cycleInfo.phase), // Use helper function
+                        fontSize = 14.sp, // Slightly reduced font size
+                        color = getCyclePhaseColor(cycleInfo.phase),
                         fontWeight = FontWeight.Bold
                     )
                 }
             }
+            Spacer(Modifier.height(16.dp)) // Increased spacing between buttons and metrics
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -434,7 +432,7 @@ fun WorkoutScreen(
             ) {
                 Box(
                     modifier = Modifier
-                        .size(48.dp)
+                        .size(44.dp)
                         .clip(CircleShape)
                         .background(Color.Gray)
                         .clickable(onClick = onPauseOrResumeClick),
@@ -443,13 +441,14 @@ fun WorkoutScreen(
                     Image(
                         painter = painterResource(id = if (isPaused) R.drawable.play_icon else R.drawable.pause_icon),
                         contentDescription = if (isPaused) "Resume" else "Pause",
-                        modifier = Modifier.size(24.dp),
+                        modifier = Modifier.size(20.dp),
                         colorFilter = ColorFilter.tint(Color.White)
                     )
                 }
+                Spacer(Modifier.width(24.dp)) // Increased spacing between buttons
                 Box(
                     modifier = Modifier
-                        .size(48.dp)
+                        .size(44.dp)
                         .clip(CircleShape)
                         .background(menstrualRed)
                         .clickable(onClick = onStopClick),
@@ -458,7 +457,7 @@ fun WorkoutScreen(
                     Image(
                         painter = painterResource(id = R.drawable.stop_icon),
                         contentDescription = "Stop",
-                        modifier = Modifier.size(24.dp),
+                        modifier = Modifier.size(20.dp),
                         colorFilter = ColorFilter.tint(Color.White)
                     )
                 }
@@ -466,6 +465,8 @@ fun WorkoutScreen(
         }
     }
 }
+
+
 
 @Composable
 fun WorkoutSummaryScreen(
