@@ -38,7 +38,7 @@ import kotlinx.coroutines.launch
 
 //private const val RESOURCES_VERSION = "0"
 
-data class MenstrualCycleInfo(val phase: CyclePhase, val dayOfCycle: Int)
+//data class MenstrualCycleInfo(val phase: CyclePhase, val dayOfCycle: Int)
 
 @OptIn(ExperimentalHorologistApi::class)
 class MainTileService : SuspendingTileService() {
