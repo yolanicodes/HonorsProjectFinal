@@ -75,7 +75,7 @@
             </intent-filter>
         </activity>
         <activity
-            android:name=".presentation.WorkoutActivity"
+            android:name=".presentation.workoutsimulation.WorkoutActivity"
             android:exported="true"
             android:taskAffinity=""
             android:theme="@style/MainActivityTheme.Starting">

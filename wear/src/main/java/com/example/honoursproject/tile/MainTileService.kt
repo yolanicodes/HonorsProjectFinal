@@ -18,11 +18,13 @@ import androidx.wear.tooling.preview.devices.WearDevices
 import com.example.honoursproject.CyclePhase
 import com.example.honoursproject.R
 import com.example.honoursproject.dataservices.SimulationManager
+import com.example.honoursproject.dataservices.WorkoutDetails
+import com.example.honoursproject.dataservices.WorkoutSimulationManager
 import com.google.android.horologist.annotations.ExperimentalHorologistApi
 import com.google.android.horologist.tiles.SuspendingTileService
 import com.example.honoursproject.presentation.theme.WhiteText
 import com.example.honoursproject.presentation.theme.toTileColorProp
-import com.example.honoursproject.presentation.WorkoutActivity
+import com.example.honoursproject.presentation.workoutsimulation.WorkoutActivity
 import com.example.honoursproject.presentation.theme.TILE_WhiteText
 import com.example.honoursproject.presentation.theme.TILE_backgroundBlue
 import com.example.honoursproject.presentation.theme.TILE_follicleGreen
@@ -34,15 +36,17 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import java.time.format.DateTimeFormatter
 
 //private const val RESOURCES_VERSION = "0"
 
-//data class MenstrualCycleInfo(val phase: CyclePhase, val dayOfCycle: Int)
+data class MenstrualCycleInfo(val phase: CyclePhase, val dayOfCycle: Int)
 
 @OptIn(ExperimentalHorologistApi::class)
 class MainTileService : SuspendingTileService() {
-    override val serviceScope = CoroutineScope(SupervisorJob() +Dispatchers.IO)
+    override val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var dataCollectionJob: Job? = null
 
     override suspend fun resourcesRequest(
@@ -54,7 +58,7 @@ class MainTileService : SuspendingTileService() {
                 "run_icon", ResourceBuilders.ImageResource.Builder()
                     .setAndroidResourceByResId(
                         ResourceBuilders.AndroidImageResourceByResId.Builder()
-                            .setResourceId(R.drawable.run_icon) // Your run icon drawable
+                            .setResourceId(R.drawable.run_icon)
                             .build()
                     )
                     .build()
@@ -63,7 +67,7 @@ class MainTileService : SuspendingTileService() {
                 "steps_icon", ResourceBuilders.ImageResource.Builder()
                     .setAndroidResourceByResId(
                         ResourceBuilders.AndroidImageResourceByResId.Builder()
-                            .setResourceId(R.drawable.steps_icon) // Your steps/walk icon drawable
+                            .setResourceId(R.drawable.steps_icon)
                             .build()
                     )
                     .build()
@@ -83,30 +87,45 @@ class MainTileService : SuspendingTileService() {
     override suspend fun tileRequest(
         requestParams: TileRequest
     ): TileBuilders.Tile {
-        SimulationManager.startStreaming(this, "P102-Health_Data_Processed.csv")
+        val schedule = WorkoutSimulationManager.workoutSchedule.first()
         val cycleInfo = getMenstrualCycleInfo()
+
+        // rootLayout is now consistently a LayoutElement
+        val rootLayout = if (schedule.upcomingWorkouts.isEmpty()) {
+            noWorkoutLayout(this, requestParams.deviceConfiguration, cycleInfo)
+        } else {
+            workoutTileLayout(this, requestParams.deviceConfiguration, cycleInfo, schedule.upcomingWorkouts)
+        }
+
         val singleTileTimeline = TimelineBuilders.Timeline.Builder().addTimelineEntry(
             TimelineBuilders.TimelineEntry.Builder().setLayout(
-                LayoutElementBuilders.Layout.Builder().setRoot(
-                    // Pass the device parameters to the layout function
-                    workoutTileLayout(this, requestParams.deviceConfiguration, cycleInfo)
-                ).build()
+                // CORRECTED: No cast is needed as rootLayout is now the correct type.
+                LayoutElementBuilders.Layout.Builder().setRoot(rootLayout).build()
             ).build()
         ).build()
 
-        return TileBuilders.Tile.Builder().setResourcesVersion(RESOURCES_VERSION)
-            .setTileTimeline(singleTileTimeline).build()
+        return TileBuilders.Tile.Builder()
+            .setResourcesVersion(RESOURCES_VERSION)
+            .setTileTimeline(singleTileTimeline)
+            .build()
     }
+
     override fun onCreate() {
         super.onCreate()
-        //  Just observe SimulationManager
+        WorkoutSimulationManager.startMonitoring(this, "your_workout_data.csv")
+
         dataCollectionJob = serviceScope.launch {
-            SimulationManager.healthDataStream.collect {
-                // Request UI refresh whenever data updates
-                getUpdater(this@MainTileService).requestUpdate(MainTileService::class.java)
+            launch {
+                SimulationManager.healthDataStream.collect {
+                    getUpdater(this@MainTileService).requestUpdate(MainTileService::class.java)
+                }
+            }
+            launch {
+                WorkoutSimulationManager.workoutSchedule.collect {
+                    getUpdater(this@MainTileService).requestUpdate(MainTileService::class.java)
+                }
             }
         }
-
     }
 
     override fun onDestroy() {
@@ -114,75 +133,24 @@ class MainTileService : SuspendingTileService() {
         dataCollectionJob?.cancel()
     }
 
-    // Modified to use SimulationService data
     private fun getMenstrualCycleInfo(): MenstrualCycleInfo {
-            val healthData = SimulationManager.healthDataStream.value
-            return MenstrualCycleInfo(
-                phase = CyclePhase.valueOf(healthData.cyclePhase.uppercase()),
-                dayOfCycle = healthData.cycleDay
-            )
+        val healthData = SimulationManager.healthDataStream.value
+        val cyclePhase = try {
+            CyclePhase.valueOf(healthData.cyclePhase.uppercase())
+        } catch (e: Exception) {
+            CyclePhase.UNKNOWN
+        }
+        return MenstrualCycleInfo(
+            phase = cyclePhase,
+            dayOfCycle = healthData.cycleDay
+        )
     }
 }
-
-private fun workoutTileLayout(
+private fun noWorkoutLayout(
     context: Context,
     deviceParameters: DeviceParametersBuilders.DeviceParameters,
     cycleInfo: MenstrualCycleInfo
-): LayoutElementBuilders.LayoutElement {
-
-    val buttonSize = DimensionBuilders.dp(50f) // Size for your workout buttons
-
-    // Clickable for Run Workout
-    val runWorkoutClickable = ModifiersBuilders.Clickable.Builder()
-        .setId("run_workout_click")
-        .setOnClick(
-            ActionBuilders.LaunchAction.Builder()
-                .setAndroidActivity(
-                    ActionBuilders.AndroidActivity.Builder()
-                        .setClassName(WorkoutActivity::class.java.name)
-                        .setPackageName(context.packageName)
-                        .addKeyToExtraMapping(
-                            "workout_type",
-                            ActionBuilders.AndroidStringExtra.Builder()
-                                .setValue("run")
-                                .build()
-                        )
-                        .build()
-                ).build()
-        ).build()
-
-    // Clickable for Walk Workout (using steps_icon)
-    val walkWorkoutClickable = ModifiersBuilders.Clickable.Builder()
-        .setId("walk_workout_click")
-        .setOnClick(
-            ActionBuilders.LaunchAction.Builder()
-                .setAndroidActivity(
-                    ActionBuilders.AndroidActivity.Builder()
-                        .setClassName(WorkoutActivity::class.java.name)
-                        .setPackageName(context.packageName)
-                        .addKeyToExtraMapping(
-                            "workout_type",
-                            ActionBuilders.AndroidStringExtra.Builder()
-                                .setValue("walk")
-                                .build()
-                        )
-                        .build()
-                ).build()
-        ).build()
-
-    // Get screen dimensions for fullscreen layout
-    val deviceHeight = deviceParameters.screenHeightDp.toFloat()
-    val deviceWidth = deviceParameters.screenWidthDp.toFloat()
-
-    // NEW: Determine the icon color based on the current menstrual phase.
-    val phaseColor = when (cycleInfo.phase) {
-        CyclePhase.MENSTRUATION -> TILE_menstrualRed
-        CyclePhase.FOLLICULAR -> TILE_follicleGreen
-        CyclePhase.OVULATION -> TILE_ovulationPink
-        CyclePhase.LUTEAL -> TILE_lutealPurple
-        CyclePhase.UNKNOWN -> TILE_WhiteText
-    }
-
+): LayoutElementBuilders.LayoutElement { // This function correctly returns LayoutElement
     return LayoutElementBuilders.Box.Builder()
         .setModifiers(
             ModifiersBuilders.Modifiers.Builder()
@@ -191,88 +159,165 @@ private fun workoutTileLayout(
                 )
                 .build()
         )
-        .setHeight(DimensionBuilders.dp(deviceHeight)) // Set box height to screen height
-        .setWidth(DimensionBuilders.dp(deviceWidth))   // Set box width to screen width
+        .setHeight(DimensionBuilders.dp(deviceParameters.screenHeightDp.toFloat()))
+        .setWidth(DimensionBuilders.dp(deviceParameters.screenWidthDp.toFloat()))
         .addContent(
             LayoutElementBuilders.Column.Builder()
                 .setHorizontalAlignment(LayoutElementBuilders.HORIZONTAL_ALIGN_CENTER)
                 .addContent(
-                    LayoutElementBuilders.Spacer.Builder().setHeight(DimensionBuilders.dp(8f)).build()
-                )
-                .addContent(
                     LayoutElementBuilders.Text.Builder()
-                        .setText("TODAY'S WORKOUT")
+                        .setText("No workouts are found for the day")
                         .setFontStyle(
-                            // FIXED: Combined font style properties into a single builder call.
                             LayoutElementBuilders.FontStyle.Builder()
                                 .setSize(DimensionBuilders.sp(14f))
                                 .setColor(TILE_WhiteText)
                                 .build()
-                        )
-                        .build()
+                        ).build()
                 )
+                .build()
+        ).build() // build() is called here, returning a Box, which is a LayoutElement.
+}
+
+// CORRECTED: The return type is now the final built object, not the builder.
+private fun workoutTileLayout(
+    context: Context,
+    deviceParameters: DeviceParametersBuilders.DeviceParameters,
+    cycleInfo: MenstrualCycleInfo,
+    workouts: List<WorkoutDetails>
+): LayoutElementBuilders.LayoutElement {
+
+    val workoutIcons = mapOf(
+        "run" to "run_icon",
+        "walk" to "steps_icon",
+    )
+
+    val workoutIconsRow = LayoutElementBuilders.Row.Builder()
+        .setVerticalAlignment(LayoutElementBuilders.VERTICAL_ALIGN_CENTER)
+
+    val timeFormatter = DateTimeFormatter.ofPattern("HH:mm")
+
+    workouts.forEachIndexed { index, workout ->
+        val iconId = workoutIcons[workout.workoutType.lowercase()] ?: "run_icon"
+
+        val clickable = ModifiersBuilders.Clickable.Builder()
+            .setId("workout_click_${workout.workoutType}")
+            .setOnClick(
+                ActionBuilders.LaunchAction.Builder()
+                    .setAndroidActivity(
+                        ActionBuilders.AndroidActivity.Builder()
+                            .setClassName(WorkoutActivity::class.java.name)
+                            .setPackageName(context.packageName)
+                            .addKeyToExtraMapping(
+                                "workout_type",
+                                ActionBuilders.AndroidStringExtra.Builder().setValue(workout.workoutType).build()
+                            )
+                            .addKeyToExtraMapping(
+                                "workout_start_time",
+                                ActionBuilders.AndroidStringExtra.Builder().setValue(workout.startTime.toString()).build()
+                            )
+                            .addKeyToExtraMapping(
+                                "workout_duration",
+                                ActionBuilders.AndroidIntExtra.Builder()
+                                    .setValue(workout.duration.toInt())
+                                    .build()
+                            )
+                            .build()
+                    ).build()
+            ).build()
+
+        val workoutColumn = LayoutElementBuilders.Column.Builder()
+            .setHorizontalAlignment(LayoutElementBuilders.HORIZONTAL_ALIGN_CENTER)
+            .setModifiers(
+                ModifiersBuilders.Modifiers.Builder()
+                    .setClickable(clickable)
+                    .build()
+            )
+            .addContent(
+                LayoutElementBuilders.Box.Builder()
+                    .setModifiers(
+                        ModifiersBuilders.Modifiers.Builder()
+                            .setBackground(
+                                ModifiersBuilders.Background.Builder()
+                                    .setCorner(ModifiersBuilders.Corner.Builder().setRadius(DimensionBuilders.dp(25f)).build())
+                                    .setColor(TILE_iconBlue)
+                                    .build()
+                            )
+                            .build()
+                    )
+                    .setHeight(DimensionBuilders.dp(50f))
+                    .setWidth(DimensionBuilders.dp(50f))
+                    .addContent(
+                        LayoutElementBuilders.Image.Builder()
+                            .setResourceId(iconId)
+                            .setWidth(DimensionBuilders.dp(30f))
+                            .setHeight(DimensionBuilders.dp(30f))
+                            .build()
+                    )
+                    .build()
+            )
+            .addContent(LayoutElementBuilders.Spacer.Builder().setHeight(DimensionBuilders.dp(4f)).build())
+            .addContent(
+                LayoutElementBuilders.Text.Builder()
+                    .setText(workout.startTime.format(timeFormatter))
+                    .setFontStyle(
+                        LayoutElementBuilders.FontStyle.Builder()
+                            .setSize(DimensionBuilders.sp(12f))
+                            .setColor(TILE_WhiteText)
+                            .build()
+                    )
+                    .build()
+            )
+
+        // Add the BUILT column to the row builder
+        workoutIconsRow.addContent(workoutColumn.build())
+
+        if (index < workouts.size - 1) {
+            workoutIconsRow.addContent(LayoutElementBuilders.Spacer.Builder().setWidth(DimensionBuilders.dp(16f)).build())
+        }
+    }
+
+    val deviceHeight = deviceParameters.screenHeightDp.toFloat()
+    val deviceWidth = deviceParameters.screenWidthDp.toFloat()
+
+    val phaseColor = when (cycleInfo.phase) {
+        CyclePhase.MENSTRUATION -> TILE_menstrualRed
+        CyclePhase.FOLLICULAR -> TILE_follicleGreen
+        CyclePhase.OVULATION -> TILE_ovulationPink
+        CyclePhase.LUTEAL -> TILE_lutealPurple
+        CyclePhase.UNKNOWN -> TILE_WhiteText
+    }
+
+    // CORRECTED: The final .build() is now here, returning a Box (which is a LayoutElement)
+    return LayoutElementBuilders.Box.Builder()
+        .setModifiers(
+            ModifiersBuilders.Modifiers.Builder()
+                .setBackground(
+                    ModifiersBuilders.Background.Builder().setColor(TILE_backgroundBlue).build()
+                )
+                .build()
+        )
+        .setHeight(DimensionBuilders.dp(deviceHeight))
+        .setWidth(DimensionBuilders.dp(deviceWidth))
+        .addContent(
+            LayoutElementBuilders.Column.Builder()
+                .setHorizontalAlignment(LayoutElementBuilders.HORIZONTAL_ALIGN_CENTER)
+                .addContent(LayoutElementBuilders.Spacer.Builder().setHeight(DimensionBuilders.dp(8f)).build())
                 .addContent(
-                    LayoutElementBuilders.Spacer.Builder().setHeight(DimensionBuilders.dp(16f)).build()
+                    LayoutElementBuilders.Column.Builder()
+                        .setHorizontalAlignment(LayoutElementBuilders.HORIZONTAL_ALIGN_CENTER)
+                        .addContent(LayoutElementBuilders.Spacer.Builder().setHeight(DimensionBuilders.dp(8f)).build())
+                        .addContent(LayoutElementBuilders.Text.Builder()
+                            .setFontStyle(
+                                LayoutElementBuilders.FontStyle.Builder()
+                                    .setSize(DimensionBuilders.sp(14f))
+                                    .setColor(TILE_WhiteText)
+                                    .build()
+                        ).build()
+                    ).build()
                 )
-                .addContent(
-                    LayoutElementBuilders.Row.Builder()
-                        .setVerticalAlignment(LayoutElementBuilders.VERTICAL_ALIGN_CENTER)
-                        .addContent(
-                            LayoutElementBuilders.Box.Builder()
-                                .setModifiers(
-                                    ModifiersBuilders.Modifiers.Builder()
-                                        .setClickable(runWorkoutClickable)
-                                        .setBackground(
-                                            ModifiersBuilders.Background.Builder()
-                                                .setCorner(ModifiersBuilders.Corner.Builder().setRadius(DimensionBuilders.dp(25f)).build()) // Circle shape
-                                                .setColor(TILE_iconBlue)
-                                                .build()
-                                        )
-                                        .build()
-                                )
-                                .setHeight(buttonSize)
-                                .setWidth(buttonSize)
-                                .addContent(
-                                    LayoutElementBuilders.Image.Builder()
-                                        .setResourceId("run_icon")
-                                        .setWidth(DimensionBuilders.dp(30f))
-                                        .setHeight(DimensionBuilders.dp(30f))
-                                        .build()
-                                )
-                                .build()
-                        )
-                        .addContent(
-                            LayoutElementBuilders.Spacer.Builder().setWidth(DimensionBuilders.dp(16f)).build()
-                        )
-                        .addContent(
-                            LayoutElementBuilders.Box.Builder()
-                                .setModifiers(
-                                    ModifiersBuilders.Modifiers.Builder()
-                                        .setClickable(walkWorkoutClickable)
-                                        .setBackground(
-                                            ModifiersBuilders.Background.Builder()
-                                                .setCorner(ModifiersBuilders.Corner.Builder().setRadius(DimensionBuilders.dp(25f)).build()) // Circle shape
-                                                .setColor(TILE_iconBlue)
-                                                .build()
-                                        )
-                                        .build()
-                                )
-                                .setHeight(buttonSize)
-                                .setWidth(buttonSize)
-                                .addContent(
-                                    LayoutElementBuilders.Image.Builder()
-                                        .setResourceId("steps_icon")
-                                        .setWidth(DimensionBuilders.dp(30f))
-                                        .setHeight(DimensionBuilders.dp(30f))
-                                        .build()
-                                )
-                                .build()
-                        )
-                        .build()
-                )
-                .addContent(
-                    LayoutElementBuilders.Spacer.Builder().setHeight(DimensionBuilders.dp(8f)).build()
-                )
+                .addContent(LayoutElementBuilders.Spacer.Builder().setHeight(DimensionBuilders.dp(16f)).build())
+                .addContent(workoutIconsRow.build())
+                .addContent(LayoutElementBuilders.Spacer.Builder().setHeight(DimensionBuilders.dp(8f)).build())
                 .addContent(
                     LayoutElementBuilders.Column.Builder()
                         .setHorizontalAlignment(LayoutElementBuilders.HORIZONTAL_ALIGN_CENTER)
@@ -281,18 +326,14 @@ private fun workoutTileLayout(
                                 .setResourceId("menstrual_drop_icon")
                                 .setWidth(DimensionBuilders.dp(24f))
                                 .setHeight(DimensionBuilders.dp(24f))
-                                // NEW: Apply a color filter to tint the icon based on the cycle phase.
                                 .setColorFilter(
                                     LayoutElementBuilders.ColorFilter.Builder().setTint(phaseColor).build()
                                 )
                                 .build()
                         )
-                        .addContent(
-                            LayoutElementBuilders.Spacer.Builder().setHeight(DimensionBuilders.dp(4f)).build()
-                        )
+                        .addContent(LayoutElementBuilders.Spacer.Builder().setHeight(DimensionBuilders.dp(4f)).build())
                         .addContent(
                             LayoutElementBuilders.Text.Builder()
-                                // MODIFIED: Use the dynamic day from cycleInfo.
                                 .setText(cycleInfo.dayOfCycle.toString())
                                 .setFontStyle(
                                     LayoutElementBuilders.FontStyle.Builder()
@@ -305,10 +346,8 @@ private fun workoutTileLayout(
                         .build()
                 )
                 .build()
-        )
-        .build()
+        ).build()
 }
-
 @Preview(
     device = WearDevices.SMALL_ROUND,
     showSystemUi = true,
