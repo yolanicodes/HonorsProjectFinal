@@ -14,6 +14,8 @@ import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import java.time.temporal.ChronoUnit
 import java.util.concurrent.TimeUnit
+import com.example.honoursproject.dataservices.EvaluationState
+import java.time.LocalDate
 
 // Create DataStore delegate on Context
 val Context.simulationDataStore by preferencesDataStore(name = "simulation_prefs")
@@ -39,11 +41,11 @@ object SimulationManager {
     private var dataLines: List<String> = emptyList()
 
 
-    // NEW: Function to get the user's age from DataStore
+
     suspend fun getUserAge(context: Context): Int {
         return context.setupDataStore.data
             .map { preferences ->
-                preferences[SetupPreferences.AGE] ?: 25 // Default to 25 if not set
+                preferences[SetupPreferences.AGE] ?: 18
             }
             .first()
     }
@@ -61,6 +63,14 @@ object SimulationManager {
                     println("Only header is being read.")
                     return@launch
                 }
+                // Determine the target date based on evaluation mode
+                val targetDate = if (EvaluationState.isEvaluationMode.value) {
+                    EvaluationState.EVALUATION_DATE
+                } else {
+                    LocalDate.now()
+                }
+                Log.i("SimulationManager", "Target date is: $targetDate (Evaluation Mode: ${EvaluationState.isEvaluationMode.value})")
+
 
                 val lastIndex = withContext(Dispatchers.IO) {
                     context.simulationDataStore.data
@@ -84,11 +94,11 @@ object SimulationManager {
                     val parts = line.split(',')
                     try {
                         val originalRecordTime = LocalDateTime.parse(parts[startTimeIndex], formatter)
-                        val dateMatches = originalRecordTime.dayOfMonth == systemNow.dayOfMonth &&
-                                originalRecordTime.monthValue == systemNow.monthValue
-                        if (dateMatches) {
-                            val recordTimeForComparison = originalRecordTime.withYear(systemNow.year)
-                            if (!recordTimeForComparison.isAfter(systemNow)) {
+
+                        // Check if the record's date matches our target date
+                        if (originalRecordTime.toLocalDate().isEqual(targetDate)) {
+                            // Compare only the time part
+                            if (!originalRecordTime.toLocalTime().isAfter(systemNow.toLocalTime())) {
                                 bestMatchIdx = idx
                             }
                         }
@@ -99,11 +109,12 @@ object SimulationManager {
                     dataLines.forEachIndexed { idx, line ->
                         val parts = line.split(',')
                         try {
-                            val recordTime = LocalDateTime.parse(parts[startTimeIndex], formatter)
-                                .withYear(systemNow.year)
-                            if (!recordTime.isAfter(systemNow)) {
-                                bestMatchIdx = idx
-                            }
+                            bestMatchIdx = dataLines.indexOfFirst { line ->
+                                try {
+                                    LocalDateTime.parse(line.split(',')[startTimeIndex], formatter)
+                                        .toLocalDate().isEqual(targetDate)
+                                } catch (e: Exception) { false }
+                            }.takeIf { it != -1 } ?: 0
                         } catch (_: Exception) { }
                     }
                 }

@@ -36,7 +36,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import java.util.Locale
 
-data class MenstrualCycleInfo(val phase: CyclePhase, val dayOfCycle: Int)
+//data class MenstrualCycleInfo(val phase: CyclePhase, val dayOfCycle: Int)
 
 @OptIn(ExperimentalHorologistApi::class)
 class StepCountTileService : SuspendingTileService() {

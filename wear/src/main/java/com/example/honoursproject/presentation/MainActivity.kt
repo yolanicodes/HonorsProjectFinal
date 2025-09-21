@@ -28,6 +28,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.wear.compose.material.*
 import com.example.honoursproject.dataservices.DataStreamService
+import com.example.honoursproject.dataservices.EvaluationState
 import com.example.honoursproject.dataservices.WorkoutSimulationManager
 import com.example.honoursproject.presentation.theme.HonoursProjectTheme
 import com.example.honoursproject.presentation.theme.backgroundBlue
@@ -144,7 +145,7 @@ class MainActivity : ComponentActivity() {
         ContextCompat.startForegroundService(this, serviceIntent)
         viewModel._isLoading.value = false
 
-        WorkoutSimulationManager.startMonitoring(this, "P102-Workout_Data.csv")
+        //WorkoutSimulationManager.startMonitoring(this, "P102-Workout_Data.csv")
 
         viewModel._isLoading.value = false
     }
@@ -168,7 +169,13 @@ class MainActivity : ComponentActivity() {
                 onStepGoalConfirmed = { viewModel.proceedToStartSimulation() },
                 onStartSimulation = { scope.launch {
                     startSimulationWithPermissionCheck()
-                } }
+                } },
+                onStartEvaluation = { scope.launch {
+                    // Set the state first
+                    EvaluationState.startEvaluationMode()
+                    // Then start the service
+                    startSimulationWithPermissionCheck()
+                }}
             )
         }
     }
@@ -182,8 +189,8 @@ fun WearApp(
     onStepGoalChange: (Int) -> Unit,
     onAgeConfirmed: () -> Unit,
     onStepGoalConfirmed: () -> Unit,
-    onStartSimulation: () -> Unit
-
+    onStartSimulation: () -> Unit,
+    onStartEvaluation: () -> Unit
 ) {
     HonoursProjectTheme {
         Box(
@@ -206,6 +213,7 @@ fun WearApp(
                 )
                 MainViewModel.SetupScreen.StartSimulation -> StartSimulationScreen(
                     onStart = onStartSimulation,
+                    onStartEvaluation,
                     isLoading = false // Pass a default or observed state here
                 )
             }
@@ -283,7 +291,8 @@ fun StepGoalPickerScreen(
 @Composable
 fun StartSimulationScreen(
     onStart: () -> Unit,
-    isLoading: Boolean // Added isLoading parameter
+    onStartEvaluation: () -> Unit,
+    isLoading: Boolean
 ) {
     Column(
         modifier = Modifier.fillMaxSize().padding( 16.dp),
@@ -299,7 +308,14 @@ fun StartSimulationScreen(
             Text("Setup Complete!")
             Spacer(modifier = Modifier.height(16.dp))
             Button(onClick = onStart) {
-                Text("Start Simulation")
+                Text("Start")
+            }
+            Spacer(modifier = Modifier.height(12.dp))
+            Button(
+                onClick = onStartEvaluation,
+                colors = ButtonDefaults.buttonColors(backgroundColor = MaterialTheme.colors.secondary)
+            ) {
+                Text("Start Evaluation")
             }
         }
     }
@@ -322,5 +338,5 @@ fun StepGoalPickerPreview() {
 @Preview(device = "id:wearos_small_round", showSystemUi = true)
 @Composable
 fun StartSimulationPreview() {
-    StartSimulationScreen(onStart = {}, isLoading = false)
+    StartSimulationScreen(onStart = {},onStartEvaluation = {}, isLoading = false)
 }

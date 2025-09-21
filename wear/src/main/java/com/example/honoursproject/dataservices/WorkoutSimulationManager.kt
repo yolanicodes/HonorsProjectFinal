@@ -16,6 +16,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import java.time.temporal.ChronoUnit
+import java.time.Duration
+import java.time.LocalDate
 import java.util.concurrent.ConcurrentHashMap
 
 // Data class to hold parsed workout details
@@ -68,6 +70,39 @@ object WorkoutSimulationManager {
         Log.i("WorkoutSimManager", "Starting workout monitoring.")
 
         monitoringJob = scope.launch {
+            if (EvaluationState.isEvaluationMode.value) {
+                Log.i("WorkoutSimManager", "EVALUATION MODE: Triggering workout sequence in 5 minutes.")
+
+                // 1. Find the first workout for the evaluation date
+                val evaluationWorkouts = findWorkoutsForDate(context, workoutCsvFileName, EvaluationState.EVALUATION_DATE)
+                _workoutSchedule.value = WorkoutSchedule(evaluationWorkouts)
+                val nextWorkout = evaluationWorkouts.firstOrNull()
+
+                if (nextWorkout != null) {
+                    // 2. Wait 5 minutes from the start of evaluation mode
+                    delay(Duration.ofMinutes(5))
+
+                    // 3. Trigger notification and launch activity
+                    sendWorkoutNotification(context, nextWorkout)
+                    if (!launchedWorkouts.contains(nextWorkout.startTime)) {
+                        launchWorkoutActivity(context, nextWorkout)
+                        _workoutState.value = WorkoutState.InProgress(nextWorkout.workoutType)
+                    }
+
+                    // 4. Schedule workout end based on its duration
+                    val durationMillis = (nextWorkout.duration * 60 * 1000).toLong()
+                    delay(durationMillis)
+
+                    val healthData = SimulationManager.healthDataStream.value
+                    val summary = WorkoutSummary(nextWorkout, healthData.cyclePhase, healthData.cycleDay, healthData.cycleDay, emptyMap())
+                    _workoutState.value = WorkoutState.Finished(summary)
+                    Log.i("WorkoutSimManager", "Evaluation workout finished.")
+                } else {
+                    Log.w("WorkoutSimManager", "No workouts found for evaluation date: ${EvaluationState.EVALUATION_DATE}")
+                }
+                // End the monitoring job after the evaluation sequence
+                return@launch
+            }
             while (isActive) {
                 // Find all workouts for today that haven't ended yet
                 val upcomingWorkouts = findUpcomingWorkoutsForToday(context, workoutCsvFileName)
@@ -145,34 +180,38 @@ object WorkoutSimulationManager {
         Log.i("WorkoutSimManager", "Workout monitoring stopped.")
     }
 
-    private suspend fun findUpcomingWorkoutsForToday(context: Context, fileName: String): List<WorkoutDetails> {
+    private suspend fun findWorkoutsForDate(context: Context, fileName: String, date: LocalDate): List<WorkoutDetails> {
         return withContext(Dispatchers.IO) {
             try {
                 val lines = context.assets.open(fileName).bufferedReader().readLines()
                 if (lines.size <= 1) return@withContext emptyList()
 
-                val header = lines.first().split(',').mapIndexed { index, name -> name.trim() to index }.toMap()
-                val formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss Z")
-                val today = LocalDateTime.now()
-
+                val header =
+                    lines.first().split(',').mapIndexed { index, name -> name.trim() to index }
+                        .toMap()
+                val formatter = DateTimeFormatter.ofPattern("yyyy/MM/dd HH:mm:ss")
                 lines.drop(1).mapNotNull { line ->
                     try {
                         val values = line.split(',')
-                        val startTime = LocalDateTime.parse(values[header.getValue("startDate")], formatter)
-                        val endTime = LocalDateTime.parse(values[header.getValue("endDate")], formatter)
-                        // MODIFIED: Check if the workout is for today and hasn't ended yet
-                        if (startTime.toLocalDate().isEqual(today.toLocalDate()) && endTime.isAfter(today)) {
+                        val startTime =
+                            LocalDateTime.parse(values[header.getValue("startDate")], formatter)
+                        if (startTime.toLocalDate() == date) {
                             WorkoutDetails(
                                 workoutType = values[header.getValue("workoutActivityType")],
                                 startTime = startTime,
-                                endTime = endTime,
+                                endTime = LocalDateTime.parse(
+                                    values[header.getValue("endDate")],
+                                    formatter
+                                ),
                                 duration = values[header.getValue("duration")].toDouble(),
                                 distance = values[header.getValue("distance")].toDouble(),
                                 avgHeartRate = values[header.getValue("AverageHeartRate")].toDouble(),
                                 activeEnergy = values[header.getValue("activeEnergyBurned")].toDouble(),
                                 basalEnergy = values[header.getValue("basalEnergyBurned")].toDouble(),
                                 maxHeartRate = values[header.getValue("AverageHeartRate")].toDouble() + 20, // Placeholder
-                                totalEnergyBurned = values[header.getValue("activeEnergyBurned")].toDouble() + values[header.getValue("basalEnergyBurned")].toDouble() // Placeholder
+                                totalEnergyBurned = values[header.getValue("activeEnergyBurned")].toDouble() + values[header.getValue(
+                                    "basalEnergyBurned"
+                                )].toDouble() // Placeholder
                             )
                         } else null
                     } catch (e: Exception) {
@@ -185,18 +224,22 @@ object WorkoutSimulationManager {
             }
         }
     }
+    private suspend fun findUpcomingWorkoutsForToday(context: Context, fileName: String): List<WorkoutDetails> {
+        val today = LocalDateTime.now()
+        val allWorkoutsForToday = findWorkoutsForDate(context, fileName, today.toLocalDate())
+        // Also filter for workouts that haven't ended yet
+        return allWorkoutsForToday.filter { it.endTime.isAfter(today) }
+    }
 
     private fun sendWorkoutNotification(context: Context, workout: WorkoutDetails) {
         val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                NOTIFICATION_CHANNEL_ID,
-                "Workout Alerts",
-                NotificationManager.IMPORTANCE_HIGH
-            )
-            notificationManager.createNotificationChannel(channel)
-        }
+        val channel = NotificationChannel(
+            NOTIFICATION_CHANNEL_ID,
+            "Workout Alerts",
+            NotificationManager.IMPORTANCE_HIGH
+        )
+        notificationManager.createNotificationChannel(channel)
 
         val timeFormatter = DateTimeFormatter.ofPattern("HH:mm")
 

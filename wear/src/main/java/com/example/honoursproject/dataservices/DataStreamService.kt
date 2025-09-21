@@ -39,7 +39,7 @@ class DataStreamService : Service() {
 
         // Start the simulation stream here
         SimulationManager.startStreaming(this, "P102-Health_Data_Processed.csv")
-
+        WorkoutSimulationManager.startMonitoring(this, "P102-Workout_Data.csv")
         // Request an initial tile update
         WatchfaceTileService.requestTileUpdate(this)
 
