@@ -79,6 +79,7 @@ dependencies {
     implementation(libs.androidx.tiles.tooling.preview)
     implementation(libs.firebase.crashlytics.buildtools)
     implementation(libs.androidx.navigation.compose.android)
+    implementation(libs.androidx.core.ktx)
     //implementation(libs.androidx.navigation.compose.jvmstubs)
     // This is for previewing tiles in Android Studio.
     debugImplementation(libs.androidx.tiles.tooling)

@@ -25,6 +25,7 @@ interface HealthRecordDao {
     @Query("SELECT * FROM health_records WHERE timestamp >= :since ORDER BY timestamp ASC")
     fun getRecordsSince(since: Long): Flow<List<HealthRecordEntity>>
 
+    // FIXED: Add the missing methods that MetricDetailViewModel is trying to use
     @Query("SELECT * FROM health_records WHERE timestamp BETWEEN :startTime AND :endTime ORDER BY timestamp ASC")
     suspend fun getRecordsBetween(startTime: Long, endTime: Long): List<HealthRecordEntity>
 
@@ -35,7 +36,7 @@ interface HealthRecordDao {
     suspend fun deleteOlderThan(cutoff: Long)
 }
 
-@Database(entities = [HealthRecordEntity::class], version = 1)
+@Database(entities = [HealthRecordEntity::class], version = 3)
 abstract class HealthDatabase : RoomDatabase() {
     abstract fun healthRecordDao(): HealthRecordDao
 

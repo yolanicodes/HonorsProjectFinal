@@ -6,6 +6,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.viewModels
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.*
@@ -17,6 +18,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -239,42 +241,61 @@ fun WeeklyStepChart(
     if (data.isEmpty()) return
 
     val maxSteps = maxOf(data.maxOfOrNull { it.stepCount } ?: 0, stepGoal)
-    val goalLineColor = CyanHZ
-    val achievedColor = follicleGreen
-    val notAchievedColor = lutealPurple.copy(alpha = 0.7f)
 
-    Canvas(modifier = modifier) {
+    // 👇 state for zoom + scroll
+    var scale by remember { mutableStateOf(1f) }
+    var offsetX by remember { mutableStateOf(0f) }
+
+    Canvas(
+        modifier = modifier
+            .pointerInput(Unit) {
+                detectTransformGestures { _, pan, zoom, _ ->
+                    // Apply zoom (limit between 1x and 3x)
+                    scale = (scale * zoom).coerceIn(1f, 3f)
+
+                    // Apply horizontal pan (scroll)
+                    offsetX += pan.x
+                }
+            }
+    ) {
         val canvasWidth = size.width
         val canvasHeight = size.height
-        val barWidth = canvasWidth / (data.size * 1.5f) // Leave space between bars
+
+        // Adjust bar width based on zoom
+        val barWidth = (canvasWidth / (data.size * 1.5f)) * scale
         val spacing = barWidth * 0.3f
 
-        // Draw goal line
+        // Keep scrolling within bounds
+        val totalWidth = data.size * (barWidth + spacing)
+        offsetX = offsetX.coerceIn(-(totalWidth - canvasWidth), 0f)
+
+        // Goal line
         val goalY = canvasHeight * (1 - stepGoal.toFloat() / maxSteps)
         drawLine(
-            color = goalLineColor,
+            color = CyanHZ,
             start = Offset(0f, goalY),
             end = Offset(canvasWidth, goalY),
             strokeWidth = 2.dp.toPx(),
             pathEffect = androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(10f, 10f))
         )
 
-        // Draw bars
+        // Bars
         data.forEachIndexed { index, dayData ->
             val barHeight = (dayData.stepCount.toFloat() / maxSteps) * canvasHeight
-            val x = index * (barWidth + spacing) + spacing
+            val x = index * (barWidth + spacing) + spacing + offsetX
             val y = canvasHeight - barHeight
 
-            val barColor = if (dayData.goalAchieved) achievedColor else notAchievedColor
+            if (x + barWidth < 0 || x > canvasWidth) return@forEachIndexed // Skip offscreen bars
 
-            // Draw bar
+            val barColor = if (dayData.goalAchieved) follicleGreen else lutealPurple.copy(alpha = 0.7f)
+
             drawRect(
                 color = barColor,
                 topLeft = Offset(x, y),
                 size = Size(barWidth, barHeight)
             )
 
-            // Draw day label
+            // Draw day labels
             drawContext.canvas.nativeCanvas.apply {
                 drawText(
                     dayData.dayOfWeek,

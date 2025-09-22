@@ -51,7 +51,7 @@ interface ArchiveRecordDao {
 
 
 
-@Database(entities = [ArchiveRecordEntity::class], version = 1)
+@Database(entities = [ArchiveRecordEntity::class], version = 3)
 abstract class ArchiveDatabase : RoomDatabase() {
     abstract fun archiveRecordDao(): ArchiveRecordDao
 
