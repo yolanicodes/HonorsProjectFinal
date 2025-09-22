@@ -2,6 +2,7 @@ package com.example.honoursproject.dataservices
 
 import android.content.Context
 import androidx.room.*
+import kotlinx.coroutines.flow.Flow
 
 @Entity(tableName = "archive_records")
 data class ArchiveRecordEntity(
@@ -25,7 +26,30 @@ interface ArchiveRecordDao {
 
     @Query("SELECT * FROM archive_records ORDER BY timestamp ASC")
     suspend fun getAll(): List<ArchiveRecordEntity>
+
+    @Query("SELECT * FROM archive_records WHERE timestamp BETWEEN :startTime AND :endTime ORDER BY timestamp ASC")
+    suspend fun getRecordsBetween(startTime: Long, endTime: Long): List<ArchiveRecordEntity>
+
+    @Query("SELECT * FROM archive_records WHERE timestamp BETWEEN :startTime AND :endTime ORDER BY timestamp ASC")
+    fun getRecordsBetweenFlow(startTime: Long, endTime: Long): Flow<List<ArchiveRecordEntity>>
+
+    @Query("""
+        SELECT 
+            DATE(timestamp / 1000, 'unixepoch') as date,
+            AVG(heartRate) as avgHeartRate,
+            MAX(stepCount) as maxSteps,
+            SUM(activeEnergyBurned) as totalEnergy,
+            cyclePhase,
+            cycleDay
+        FROM archive_records 
+        WHERE timestamp BETWEEN :startTime AND :endTime 
+        GROUP BY DATE(timestamp / 1000, 'unixepoch')
+        ORDER BY date ASC
+    """)
+    suspend fun getDailyAggregatesRaw(startTime: Long, endTime: Long): List<DailyAggregateRaw>
 }
+
+
 
 @Database(entities = [ArchiveRecordEntity::class], version = 1)
 abstract class ArchiveDatabase : RoomDatabase() {

@@ -6,8 +6,7 @@ import kotlinx.coroutines.flow.Flow
 
 @Entity(tableName = "health_records")
 data class HealthRecordEntity(
-    @PrimaryKey(autoGenerate = true)
-    val timestamp: Long,
+    @PrimaryKey val timestamp: Long, // Fixed: removed autoGenerate = true
     val heartRate: Double,
     val stepCount: Int,
     val activeEnergyBurned: Double,
@@ -25,6 +24,13 @@ interface HealthRecordDao {
 
     @Query("SELECT * FROM health_records WHERE timestamp >= :since ORDER BY timestamp ASC")
     fun getRecordsSince(since: Long): Flow<List<HealthRecordEntity>>
+
+    @Query("SELECT * FROM health_records WHERE timestamp BETWEEN :startTime AND :endTime ORDER BY timestamp ASC")
+    suspend fun getRecordsBetween(startTime: Long, endTime: Long): List<HealthRecordEntity>
+
+    @Query("SELECT * FROM health_records WHERE timestamp BETWEEN :startTime AND :endTime ORDER BY timestamp ASC")
+    fun getRecordsBetweenFlow(startTime: Long, endTime: Long): Flow<List<HealthRecordEntity>>
+
     @Query("DELETE FROM health_records WHERE timestamp < :cutoff")
     suspend fun deleteOlderThan(cutoff: Long)
 }

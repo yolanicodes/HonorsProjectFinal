@@ -17,6 +17,7 @@ import androidx.wear.protolayout.ModifiersBuilders.Corner
 import androidx.wear.protolayout.ModifiersBuilders.Padding
 import androidx.wear.protolayout.ResourceBuilders
 import androidx.wear.protolayout.TimelineBuilders
+import androidx.wear.protolayout.expression.ProtoLayoutExperimental
 import androidx.wear.tiles.RequestBuilders
 import androidx.wear.tiles.TileBuilders
 import com.example.honoursproject.R
@@ -35,6 +36,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import java.util.Locale
+import kotlin.math.min
 
 //data class MenstrualCycleInfo(val phase: CyclePhase, val dayOfCycle: Int)
 
@@ -82,18 +84,22 @@ class StepCountTileService : SuspendingTileService() {
         val currentSteps = SimulationManager.getCumulativeSteps()
         val menstrualInfo = getMenstrualCycleInfo()
 
+        // Calculate progress percentage with smooth animation
         val progressPercentage = if (stepGoal > 0) {
-            (currentSteps.toFloat() / stepGoal.toFloat()).coerceAtMost(1.0f)
+            min(currentSteps.toFloat() / stepGoal.toFloat(), 1.0f)
         } else 0f
 
         val progressDegrees = (progressPercentage * 360f).toInt()
+
+        // Determine if goal is achieved
+        val goalAchieved = currentSteps >= stepGoal
 
         val singleTileTimeline = TimelineBuilders.Timeline.Builder()
             .addTimelineEntry(
                 TimelineBuilders.TimelineEntry.Builder()
                     .setLayout(
                         LayoutElementBuilders.Layout.Builder()
-                            .setRoot(createLayout(currentSteps, stepGoal, progressDegrees, menstrualInfo))
+                            .setRoot(createLayout(currentSteps, stepGoal, progressDegrees, goalAchieved, menstrualInfo))
                             .build()
                     )
                     .build()
@@ -123,6 +129,7 @@ class StepCountTileService : SuspendingTileService() {
         currentSteps: Int,
         stepGoal: Int,
         progressDegrees: Int,
+        goalAchieved: Boolean,
         menstrualInfo: MenstrualCycleInfo
     ): LayoutElementBuilders.LayoutElement {
         return Box.Builder()
@@ -147,7 +154,7 @@ class StepCountTileService : SuspendingTileService() {
                                 ActionBuilders.LaunchAction.Builder()
                                     .setAndroidActivity(
                                         ActionBuilders.AndroidActivity.Builder()
-                                            .setClassName(MainActivity::class.java.name)
+                                            .setClassName("com.example.honoursproject.presentation.StepAnalyticsActivity")
                                             .setPackageName(packageName)
                                             .build()
                                     )
@@ -157,70 +164,107 @@ class StepCountTileService : SuspendingTileService() {
                     )
                     .build()
             )
-            .addContent(createProgressArc(progressDegrees))
-            .addContent(createCenterContent(currentSteps, stepGoal, menstrualInfo))
+            .addContent(createProgressArc(progressDegrees, goalAchieved))
+            .addContent(createCenterContent(currentSteps, stepGoal, goalAchieved, menstrualInfo))
             .build()
     }
 
-    private fun createProgressArc(progressDegrees: Int): LayoutElementBuilders.LayoutElement {
+    private fun createProgressArc(progressDegrees: Int,goalAchieved: Boolean): LayoutElementBuilders.LayoutElement {
         return Arc.Builder()
+            // Background arc
             .addContent(
                 ArcLine.Builder()
                     .setLength(degrees(360f))
                     .setColor(TILE_GrayInactive)
-                    .setThickness(dp(8f))
+                    .setThickness(dp(12f))
                     .build()
             )
+            // Progress arc with dynamic color
             .addContent(
                 ArcLine.Builder()
                     .setLength(degrees(progressDegrees.toFloat()))
                     .setColor(TILE_CyanHZ)
-                    .setThickness(dp(8f))
+                    .setThickness(dp(12f))
                     .build()
             )
+            // Add milestone markers at 25%, 50%, 75%
+          .addContent(
+             ArcLine.Builder()
+                   .setLength(degrees(2f))
+                  .setColor(TILE_WhiteText)
+                   .setThickness(dp(14f))
+                    //.setAngularAlignment(LayoutElementBuilders.ARC_ANCHOR_START)
+                    .build()
+           )
             .build()
     }
 
+    @androidx.annotation.OptIn(ProtoLayoutExperimental::class)
     private fun createCenterContent(
         currentSteps: Int,
         stepGoal: Int,
+        goalAchieved: Boolean,
         menstrualInfo: MenstrualCycleInfo
     ): LayoutElementBuilders.LayoutElement {
+        val progressPercentage = if (stepGoal > 0) {
+            min(currentSteps * 100 / stepGoal, 100)
+        } else 0
+
         return Column.Builder()
-            .setWidth(dp(120f))
-            .setHeight(dp(120f))
+            .setWidth(dp(140f))
+            .setHeight(dp(140f))
             .setHorizontalAlignment(LayoutElementBuilders.HORIZONTAL_ALIGN_CENTER)
-            .addContent(Spacer.Builder().setHeight(dp(12f)).build())
+            .addContent(Spacer.Builder().setHeight(dp(8f)).build())
+
+            // Current step count - larger and more prominent
             .addContent(
                 Text.Builder()
                     .setText(formatStepCount(currentSteps))
                     .setFontStyle(
                         LayoutElementBuilders.FontStyle.Builder()
-                            .setColor(TILE_WhiteText)
-                            // Changed: Increased text size for current steps
-                            .setSize(sp(28f))
+                            .setColor(if (goalAchieved) TILE_follicleGreen else TILE_WhiteText)
+                            .setSize(sp(32f))
                             .setWeight(LayoutElementBuilders.FONT_WEIGHT_BOLD)
                             .build()
                     )
                     .build()
             )
-            // Changed: Added two spacers to push the following content down
-            .addContent(Spacer.Builder().setHeight(dp(4f)).build())
-            .addContent(Spacer.Builder().setHeight(dp(4f)).build())
+
+            .addContent(Spacer.Builder().setHeight(dp(2f)).build())
+
+            // Progress percentage
             .addContent(
                 Text.Builder()
-                    .setText("/${formatStepCount(stepGoal)} STEPS")
+                    .setText("$progressPercentage%")
                     .setFontStyle(
                         LayoutElementBuilders.FontStyle.Builder()
-                            .setColor(TILE_GrayInactive)
+                            .setColor(TILE_CyanHZ)
                             .setSize(sp(12f))
+                            .setWeight(LayoutElementBuilders.FONT_WEIGHT_MEDIUM)
                             .build()
                     )
                     .build()
             )
+
+            .addContent(Spacer.Builder().setHeight(dp(4f)).build())
+
+            // Goal text with achievement status
+            .addContent(
+                Text.Builder()
+                    .setText(if (goalAchieved) "GOAL ACHIEVED!" else "/${formatStepCount(stepGoal)} GOAL")
+                    .setFontStyle(
+                        LayoutElementBuilders.FontStyle.Builder()
+                            .setColor(if (goalAchieved) TILE_follicleGreen else TILE_GrayInactive)
+                            .setSize(sp(10f))
+                            .setWeight(if (goalAchieved) LayoutElementBuilders.FONT_WEIGHT_BOLD else LayoutElementBuilders.FONT_WEIGHT_NORMAL)
+                            .build()
+                    )
+                    .build()
+            )
+
             .addContent(Spacer.Builder().setHeight(dp(8f)).build())
             .addContent(createMenstrualCycleDisplay(menstrualInfo))
-            .addContent(Spacer.Builder().setHeight(dp(12f)).build())
+            .addContent(Spacer.Builder().setHeight(dp(8f)).build())
             .build()
     }
 

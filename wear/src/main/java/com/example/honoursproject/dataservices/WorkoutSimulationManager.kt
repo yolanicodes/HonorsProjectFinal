@@ -4,15 +4,14 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
-import android.os.Build
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.example.honoursproject.R
 import com.example.honoursproject.presentation.workoutsimulation.WorkoutActivity
 import kotlinx.coroutines.*
-import kotlinx.coroutines.time.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.time.delay
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import java.time.temporal.ChronoUnit
@@ -62,8 +61,11 @@ object WorkoutSimulationManager {
     private val _workoutSchedule = MutableStateFlow(WorkoutSchedule())
     val workoutSchedule = _workoutSchedule.asStateFlow()
 
-    // NEW: A set to track workouts for which an activity has been launched
+    // A set to track workouts for which an activity has been launched
     private val launchedWorkouts = ConcurrentHashMap.newKeySet<LocalDateTime>()
+
+    // UPDATED: Track evaluation mode start time
+    private var evaluationStartTime: LocalDateTime? = null
 
     fun startMonitoring(context: Context, workoutCsvFileName: String) {
         if (monitoringJob?.isActive == true) return
@@ -71,50 +73,40 @@ object WorkoutSimulationManager {
 
         monitoringJob = scope.launch {
             if (EvaluationState.isEvaluationMode.value) {
-                Log.i("WorkoutSimManager", "EVALUATION MODE: Triggering workout sequence in 5 minutes.")
+                // UPDATED: Record evaluation start time and implement new timing logic
+                evaluationStartTime = LocalDateTime.now()
+                Log.i("WorkoutSimManager", "EVALUATION MODE: Started at $evaluationStartTime")
 
-                // 1. Find the first workout for the evaluation date
+                // Find workouts for the evaluation date (2023-08-19)
                 val evaluationWorkouts = findWorkoutsForDate(context, workoutCsvFileName, EvaluationState.EVALUATION_DATE)
                 _workoutSchedule.value = WorkoutSchedule(evaluationWorkouts)
-                val nextWorkout = evaluationWorkouts.firstOrNull()
 
-                if (nextWorkout != null) {
-                    // 2. Wait 5 minutes from the start of evaluation mode
-                    delay(Duration.ofMinutes(5))
-
-                    // 3. Trigger notification and launch activity
-                    sendWorkoutNotification(context, nextWorkout)
-                    if (!launchedWorkouts.contains(nextWorkout.startTime)) {
-                        launchWorkoutActivity(context, nextWorkout)
-                        _workoutState.value = WorkoutState.InProgress(nextWorkout.workoutType)
-                    }
-
-                    // 4. Schedule workout end based on its duration
-                    val durationMillis = (nextWorkout.duration * 60 * 1000).toLong()
-                    delay(durationMillis)
-
-                    val healthData = SimulationManager.healthDataStream.value
-                    val summary = WorkoutSummary(nextWorkout, healthData.cyclePhase, healthData.cycleDay, healthData.cycleDay, emptyMap())
-                    _workoutState.value = WorkoutState.Finished(summary)
-                    Log.i("WorkoutSimManager", "Evaluation workout finished.")
-                } else {
+                if (evaluationWorkouts.isEmpty()) {
                     Log.w("WorkoutSimManager", "No workouts found for evaluation date: ${EvaluationState.EVALUATION_DATE}")
+                    return@launch
                 }
-                // End the monitoring job after the evaluation sequence
+
+                Log.i("WorkoutSimManager", "Found ${evaluationWorkouts.size} workouts for evaluation date")
+
+                // Process each workout with evaluation timing
+                evaluationWorkouts.forEach { workout ->
+                    processEvaluationWorkout(context, workout)
+                }
+
                 return@launch
             }
+
+            // Normal mode logic (unchanged)
             while (isActive) {
-                // Find all workouts for today that haven't ended yet
                 val upcomingWorkouts = findUpcomingWorkoutsForToday(context, workoutCsvFileName)
                 _workoutSchedule.value = WorkoutSchedule(upcomingWorkouts)
 
-                // The rest of the logic should focus on the NEXT workout in the list
                 val nextWorkout = upcomingWorkouts.minByOrNull { it.startTime }
 
                 if (nextWorkout == null) {
                     Log.i("WorkoutSimManager", "No more workouts scheduled for today. Checking again in 5 minutes.")
-                    delay(java.time.Duration.ofMinutes(5))
-                    continue // Restart the loop
+                    delay(Duration.ofMinutes(5))
+                    continue
                 }
 
                 Log.i("WorkoutSimManager", "Next workout found: ${nextWorkout.workoutType} at ${nextWorkout.startTime}")
@@ -134,7 +126,6 @@ object WorkoutSimulationManager {
                 if (now.isBefore(launchTime)) {
                     val delayMillis = ChronoUnit.MILLIS.between(LocalDateTime.now(), launchTime)
                     delay(delayMillis)
-                    // CRITICAL: Only launch if the user hasn't already started it
                     if (!launchedWorkouts.contains(nextWorkout.startTime)) {
                         launchWorkoutActivity(context, nextWorkout)
                         _workoutState.value = WorkoutState.InProgress(nextWorkout.workoutType)
@@ -149,8 +140,8 @@ object WorkoutSimulationManager {
                     val healthData = SimulationManager.healthDataStream.value
                     val summary = WorkoutSummary(
                         nextWorkout, healthData.cyclePhase, healthData.cycleDay,
-                        dayOfCycle = healthData.cycleDay, // Assuming this is correct
-                        heartZones = emptyMap() // Summary logic might need adjustment
+                        dayOfCycle = healthData.cycleDay,
+                        heartZones = emptyMap()
                     )
                     _workoutState.value = WorkoutState.Finished(summary)
                     Log.i("WorkoutSimManager", "Workout finished. Summary generated.")
@@ -158,15 +149,84 @@ object WorkoutSimulationManager {
                     _workoutState.value = WorkoutState.Idle
                 }
 
-                // Once a workout is finished, remove it from the launched set
                 launchedWorkouts.remove(nextWorkout.startTime)
-                // Short delay before checking for the next workout
                 delay(1000)
             }
         }
     }
 
-    // NEW: Public method for the Activity to call to prevent auto-launch
+    // NEW: Process workout in evaluation mode with specific timing
+    private suspend fun processEvaluationWorkout(context: Context, workout: WorkoutDetails) {
+        val evaluationStart = evaluationStartTime ?: return
+
+        Log.i("WorkoutSimManager", "Processing evaluation workout: ${workout.workoutType} originally scheduled for ${workout.startTime}")
+
+        try {
+            // UPDATED: Wait 5 minutes from evaluation start, then send notification
+            val notificationTime = evaluationStart.plusMinutes(5)
+            val workoutStartTime = evaluationStart.plusMinutes(8)
+
+            Log.i("WorkoutSimManager", "Notification scheduled for: $notificationTime")
+            Log.i("WorkoutSimManager", "Workout start scheduled for: $workoutStartTime")
+
+            // Wait for notification time
+            val notificationDelay = ChronoUnit.MILLIS.between(LocalDateTime.now(), notificationTime)
+            if (notificationDelay > 0) {
+                Log.i("WorkoutSimManager", "Waiting ${notificationDelay}ms for notification time")
+                delay(notificationDelay)
+            }
+
+            // Send notification
+            sendWorkoutNotification(context, workout)
+            Log.i("WorkoutSimManager", "Notification sent at ${LocalDateTime.now()}")
+
+            // Wait for workout start time
+            val workoutStartDelay = ChronoUnit.MILLIS.between(LocalDateTime.now(), workoutStartTime)
+            if (workoutStartDelay > 0) {
+                Log.i("WorkoutSimManager", "Waiting ${workoutStartDelay}ms for workout start")
+                delay(workoutStartDelay)
+            }
+
+            // Launch workout activity
+            if (!launchedWorkouts.contains(workout.startTime)) {
+                // UPDATED: Create workout with evaluation timing
+                val evaluationWorkout = workout.copy(
+                    startTime = workoutStartTime,
+                    endTime = workoutStartTime.plusMinutes(workout.duration.toLong())
+                )
+
+                launchWorkoutActivity(context, evaluationWorkout)
+                _workoutState.value = WorkoutState.InProgress(workout.workoutType)
+                Log.i("WorkoutSimManager", "Evaluation workout started at ${LocalDateTime.now()}")
+
+                // Schedule workout end
+                val workoutEndTime = workoutStartTime.plusMinutes(workout.duration.toLong())
+                val endDelay = ChronoUnit.MILLIS.between(LocalDateTime.now(), workoutEndTime)
+
+                if (endDelay > 0) {
+                    Log.i("WorkoutSimManager", "Workout will end in ${endDelay}ms at $workoutEndTime")
+                    delay(endDelay)
+                }
+
+                // Finish workout
+                val healthData = SimulationManager.healthDataStream.value
+                val summary = WorkoutSummary(
+                    evaluationWorkout,
+                    healthData.cyclePhase,
+                    healthData.cycleDay,
+                    healthData.cycleDay,
+                    emptyMap()
+                )
+                _workoutState.value = WorkoutState.Finished(summary)
+                Log.i("WorkoutSimManager", "Evaluation workout finished at ${LocalDateTime.now()}")
+            }
+
+        } catch (e: Exception) {
+            Log.e("WorkoutSimManager", "Error processing evaluation workout", e)
+        }
+    }
+
+    // Public method for the Activity to call to prevent auto-launch
     fun userInitiatedWorkout(startTime: LocalDateTime) {
         Log.i("WorkoutSimManager", "User initiated workout for $startTime. Preventing auto-launch.")
         launchedWorkouts.add(startTime)
@@ -176,58 +236,62 @@ object WorkoutSimulationManager {
         monitoringJob?.cancel()
         monitoringJob = null
         launchedWorkouts.clear()
+        evaluationStartTime = null
         _workoutState.value = WorkoutState.Idle
         Log.i("WorkoutSimManager", "Workout monitoring stopped.")
     }
 
+    // UPDATED: Enhanced workout finding for evaluation mode
     private suspend fun findWorkoutsForDate(context: Context, fileName: String, date: LocalDate): List<WorkoutDetails> {
         return withContext(Dispatchers.IO) {
             try {
                 val lines = context.assets.open(fileName).bufferedReader().readLines()
                 if (lines.size <= 1) return@withContext emptyList()
 
-                val header =
-                    lines.first().split(',').mapIndexed { index, name -> name.trim() to index }
-                        .toMap()
+                val header = lines.first().split(',').mapIndexed { index, name -> name.trim() to index }.toMap()
                 val formatter = DateTimeFormatter.ofPattern("yyyy/MM/dd HH:mm:ss")
-                lines.drop(1).mapNotNull { line ->
+
+                val workouts = lines.drop(1).mapNotNull { line ->
                     try {
                         val values = line.split(',')
-                        val startTime =
-                            LocalDateTime.parse(values[header.getValue("startDate")], formatter)
-                        if (startTime.toLocalDate() == date) {
+                        val startTime = LocalDateTime.parse(values[header.getValue("startDate")], formatter)
+
+                        // UPDATED: Check for exact date match
+                        if (startTime.toLocalDate().isEqual(date)) {
+                            Log.i("WorkoutSimManager", "Found workout for $date: ${values[header.getValue("workoutActivityType")]} at $startTime")
+
                             WorkoutDetails(
                                 workoutType = values[header.getValue("workoutActivityType")],
                                 startTime = startTime,
-                                endTime = LocalDateTime.parse(
-                                    values[header.getValue("endDate")],
-                                    formatter
-                                ),
+                                endTime = LocalDateTime.parse(values[header.getValue("endDate")], formatter),
                                 duration = values[header.getValue("duration")].toDouble(),
                                 distance = values[header.getValue("distance")].toDouble(),
                                 avgHeartRate = values[header.getValue("AverageHeartRate")].toDouble(),
                                 activeEnergy = values[header.getValue("activeEnergyBurned")].toDouble(),
                                 basalEnergy = values[header.getValue("basalEnergyBurned")].toDouble(),
-                                maxHeartRate = values[header.getValue("AverageHeartRate")].toDouble() + 20, // Placeholder
-                                totalEnergyBurned = values[header.getValue("activeEnergyBurned")].toDouble() + values[header.getValue(
-                                    "basalEnergyBurned"
-                                )].toDouble() // Placeholder
+                                maxHeartRate = values[header.getValue("AverageHeartRate")].toDouble() + 20,
+                                totalEnergyBurned = values[header.getValue("activeEnergyBurned")].toDouble() + values[header.getValue("basalEnergyBurned")].toDouble()
                             )
                         } else null
                     } catch (e: Exception) {
+                        Log.e("WorkoutSimManager", "Error parsing workout data: ${e.message}")
                         null
                     }
                 }
+
+                Log.i("WorkoutSimManager", "Found ${workouts.size} workouts for date $date")
+                workouts
+
             } catch (e: Exception) {
                 Log.e("WorkoutSimManager", "Error reading workout CSV", e)
                 emptyList()
             }
         }
     }
+
     private suspend fun findUpcomingWorkoutsForToday(context: Context, fileName: String): List<WorkoutDetails> {
         val today = LocalDateTime.now()
         val allWorkoutsForToday = findWorkoutsForDate(context, fileName, today.toLocalDate())
-        // Also filter for workouts that haven't ended yet
         return allWorkoutsForToday.filter { it.endTime.isAfter(today) }
     }
 
@@ -242,31 +306,34 @@ object WorkoutSimulationManager {
         notificationManager.createNotificationChannel(channel)
 
         val timeFormatter = DateTimeFormatter.ofPattern("HH:mm")
+        val notificationText = if (EvaluationState.isEvaluationMode.value) {
+            "Evaluation workout: ${workout.workoutType} starting soon!"
+        } else {
+            "${workout.workoutType} workout scheduled for ${workout.startTime.format(timeFormatter)}."
+        }
 
         val notification = NotificationCompat.Builder(context, NOTIFICATION_CHANNEL_ID)
             .setSmallIcon(R.drawable.run_icon)
             .setContentTitle("Workout Approaching")
-            .setContentText("${workout.workoutType} workout scheduled for ${workout.startTime.format(timeFormatter)}.")
+            .setContentText(notificationText)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setAutoCancel(true)
             .build()
 
         notificationManager.notify(1, notification)
-        Log.i("WorkoutSimManager", "Notification sent.")
+        Log.i("WorkoutSimManager", "Notification sent: $notificationText")
     }
 
     private fun launchWorkoutActivity(context: Context, workout: WorkoutDetails) {
-        // Also add this workout to the launched set
         launchedWorkouts.add(workout.startTime)
 
         val intent = Intent(context, WorkoutActivity::class.java).apply {
             putExtra("workout_type", workout.workoutType)
-            // MODIFIED: Pass start time as a robust ISO string
             putExtra("workout_start_time", workout.startTime.toString())
             putExtra("workout_duration", workout.duration.toInt())
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         context.startActivity(intent)
-        Log.i("WorkoutSimManager", "Launching WorkoutActivity automatically for workout at ${workout.startTime}")
+        Log.i("WorkoutSimManager", "Launching WorkoutActivity for workout at ${workout.startTime}")
     }
 }

@@ -17,13 +17,10 @@
       <SelectionState runConfigName="StepCountTileService">
         <option name="selectionMode" value="DROPDOWN" />
       </SelectionState>
-      <SelectionState runConfigName="WatchfaceTileService">
+      <SelectionState runConfigName="wear.WatchfaceTileService">
         <option name="selectionMode" value="DROPDOWN" />
       </SelectionState>
-      <SelectionState runConfigName="wear.MainTileService">
-        <option name="selectionMode" value="DROPDOWN" />
-      </SelectionState>
-      <SelectionState runConfigName="MainActivity (1)">
+      <SelectionState runConfigName="MainTileService">
         <option name="selectionMode" value="DROPDOWN" />
       </SelectionState>
     </selectionStates>

@@ -63,7 +63,11 @@
         <meta-data
             android:name="com.google.android.wearable.standalone"
             android:value="true" />
-
+        <activity
+            android:name=".presentation.StepAnalyticsActivity"
+            android:exported="false"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.DeviceDefault" />
         <activity
             android:name=".presentation.MainActivity"
             android:exported="true"
