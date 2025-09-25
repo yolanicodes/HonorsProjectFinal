@@ -43,7 +43,7 @@ import java.time.format.DateTimeFormatter
 
 
 
-data class MenstrualCycleInfo(val phase: CyclePhase, val dayOfCycle: Int)
+//data class MenstrualCycleInfo(val phase: CyclePhase, val dayOfCycle: Int)
 
 @OptIn(ExperimentalHorologistApi::class)
 class MainTileService : SuspendingTileService() {

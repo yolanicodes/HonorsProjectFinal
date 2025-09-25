@@ -1,6 +1,7 @@
 package com.example.honoursproject.tile
 
 import android.annotation.SuppressLint
+import android.util.Log
 import androidx.wear.protolayout.ActionBuilders
 import androidx.wear.protolayout.DimensionBuilders.dp
 import androidx.wear.protolayout.DimensionBuilders.degrees
@@ -26,7 +27,6 @@ import com.example.honoursproject.CyclePhase
 import com.example.honoursproject.dataservices.SimulationManager
 import com.example.honoursproject.presentation.SetupPreferences
 import com.example.honoursproject.presentation.setupDataStore
-import com.example.honoursproject.presentation.MainActivity
 import com.example.honoursproject.presentation.theme.*
 import com.google.android.horologist.annotations.ExperimentalHorologistApi
 import com.google.android.horologist.tiles.SuspendingTileService
@@ -39,6 +39,10 @@ import kotlinx.coroutines.launch
 import java.util.Locale
 import kotlin.math.min
 
+data class MenstrualCycleInfo(
+    val phase: CyclePhase,
+    val dayOfCycle: Int
+)
 
 @OptIn(ExperimentalHorologistApi::class)
 class StepCountTileService : SuspendingTileService() {
@@ -47,8 +51,9 @@ class StepCountTileService : SuspendingTileService() {
 
     companion object {
         private const val CYCLE_ICON_ID = "cycle_icon"
-        // Define the custom action
-        const val ACTION_OPEN_STEP_ANALYTICS = "com.example.honoursproject.STEP_ANALYTICS"
+        const val EXTRA_LAUNCHED_FROM = "launched_from"
+        const val EXTRA_CURRENT_STEPS = "current_steps"
+        const val VALUE_STEP_TILE = "step_tile"
     }
 
     override fun onCreate() {
@@ -84,16 +89,14 @@ class StepCountTileService : SuspendingTileService() {
     override suspend fun tileRequest(requestParams: RequestBuilders.TileRequest): TileBuilders.Tile {
         val stepGoal = getStepGoal()
         val currentSteps = SimulationManager.getCumulativeSteps()
+        Log.d("StepCountTileService", "Tile request - Steps: $currentSteps, Goal: $stepGoal")
         val menstrualInfo = getMenstrualCycleInfo()
 
-        // Calculate progress percentage with smooth animation
         val progressPercentage = if (stepGoal > 0) {
             min(currentSteps.toFloat() / stepGoal.toFloat(), 1.0f)
         } else 0f
 
         val progressDegrees = (progressPercentage * 360f).toInt()
-
-        // Determine if goal is achieved
         val goalAchieved = currentSteps >= stepGoal
 
         val singleTileTimeline = TimelineBuilders.Timeline.Builder()
@@ -156,8 +159,14 @@ class StepCountTileService : SuspendingTileService() {
                                 ActionBuilders.LaunchAction.Builder()
                                     .setAndroidActivity(
                                         ActionBuilders.AndroidActivity.Builder()
-                                            .setPackageName(packageName)
-                                            .setClassName("com.example.honoursproject.presentation.StepAnalyticsActivity")
+                                            .setPackageName(this.packageName)
+                                            .setClassName("${this.packageName}.presentation.StepAnalyticsActivity")
+                                            .addKeyToExtraMapping(
+                                                StepCountTileService.EXTRA_CURRENT_STEPS,
+                                                ActionBuilders.AndroidIntExtra.Builder()
+                                                    .setValue(SimulationManager.getCumulativeSteps())
+                                                    .build()
+                                            )
                                             .build()
                                     )
                                     .build()
@@ -174,9 +183,7 @@ class StepCountTileService : SuspendingTileService() {
     @SuppressLint("RestrictedApi")
     private fun createProgressArc(progressDegrees: Int, goalAchieved: Boolean): LayoutElementBuilders.LayoutElement {
         return Arc.Builder()
-            // This makes the arc start at the 12 o'clock position
-            .setAnchorAngle(degrees(-90f))
-            // Background arc
+            .setAnchorAngle(degrees(-180f))
             .addContent(
                 ArcLine.Builder()
                     .setLength(degrees(360f))
@@ -184,7 +191,6 @@ class StepCountTileService : SuspendingTileService() {
                     .setThickness(dp(12f))
                     .build()
             )
-            // Progress arc with dynamic color
             .addContent(
                 ArcLine.Builder()
                     .setLength(degrees(progressDegrees.toFloat()))
@@ -211,8 +217,6 @@ class StepCountTileService : SuspendingTileService() {
             .setHeight(dp(140f))
             .setHorizontalAlignment(LayoutElementBuilders.HORIZONTAL_ALIGN_CENTER)
             .addContent(Spacer.Builder().setHeight(dp(8f)).build())
-
-            // Current step count - larger and more prominent
             .addContent(
                 Text.Builder()
                     .setText(formatStepCount(currentSteps))
@@ -225,13 +229,8 @@ class StepCountTileService : SuspendingTileService() {
                     )
                     .build()
             )
-
             .addContent(Spacer.Builder().setHeight(dp(2f)).build())
-
-
             .addContent(Spacer.Builder().setHeight(dp(2f)).build())
-
-            // Goal text with achievement status
             .addContent(
                 Text.Builder()
                     .setText(if (goalAchieved) "GOAL ACHIEVED!" else "/${formatStepCount(stepGoal)} GOAL")
@@ -245,8 +244,6 @@ class StepCountTileService : SuspendingTileService() {
                     .build()
             )
             .addContent(Spacer.Builder().setHeight(dp(2f)).build())
-
-            // Progress percentage
             .addContent(
                 Text.Builder()
                     .setText("$progressPercentage%")
@@ -259,7 +256,6 @@ class StepCountTileService : SuspendingTileService() {
                     )
                     .build()
             )
-
             .addContent(Spacer.Builder().setHeight(dp(8f)).build())
             .addContent(createMenstrualCycleDisplay(menstrualInfo))
             .addContent(Spacer.Builder().setHeight(dp(8f)).build())
@@ -267,7 +263,6 @@ class StepCountTileService : SuspendingTileService() {
     }
 
     private fun createMenstrualCycleDisplay(info: MenstrualCycleInfo): LayoutElementBuilders.LayoutElement {
-        // Get the phase-specific color
         val phaseColor = when (info.phase) {
             CyclePhase.MENSTRUATION -> TILE_menstrualRed
             CyclePhase.FOLLICULAR -> TILE_follicleGreen

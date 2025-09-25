@@ -1,5 +1,6 @@
 package com.example.honoursproject.presentation
 
+import android.content.Context
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -16,10 +17,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
@@ -28,8 +27,10 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.wear.compose.material.*
+import com.example.honoursproject.CyclePhase
 import com.example.honoursproject.dataservices.*
 import com.example.honoursproject.presentation.theme.*
+import com.example.honoursproject.tile.StepCountTileService
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -65,7 +66,8 @@ sealed class StepAnalyticsUiState {
 }
 
 class StepAnalyticsViewModel(
-    private val context: android.content.Context
+    private val context: Context,
+    private val tileStepCount: Int = -1
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow<StepAnalyticsUiState>(StepAnalyticsUiState.Loading)
@@ -85,7 +87,11 @@ class StepAnalyticsViewModel(
                 val endOfWeek = startOfWeek.plusDays(6)
 
                 val stepGoal = getStepGoal()
-                val currentSteps = SimulationManager.getCumulativeSteps()
+                val currentSteps = if (tileStepCount > 0) {
+                    tileStepCount
+                } else {
+                    SimulationManager.getCumulativeSteps()
+                }
 
                 // Get data for the past 7 days
                 val weeklyData = mutableListOf<DailyStepData>()
@@ -148,9 +154,13 @@ class StepAnalyticsViewModel(
 class StepAnalyticsActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        val currentStepsFromTile = intent?.getIntExtra(
+            StepCountTileService.EXTRA_CURRENT_STEPS, -1
+        ) ?: -1
+
 
         val viewModel by viewModels<StepAnalyticsViewModel> {
-            StepAnalyticsViewModelFactory(this.applicationContext)
+            StepAnalyticsViewModelFactory(this.applicationContext, currentStepsFromTile)
         }
 
         setContent {
@@ -202,17 +212,17 @@ fun StepAnalyticsScreen(state: StepAnalyticsUiState) {
                 Text(
                     text = "Weekly Steps",
                     color = WhiteText,
-                    fontSize = 16.sp,
+                    fontSize = 12.sp,
                     fontWeight = FontWeight.Bold
                 )
 
                 Text(
                     text = state.weeklyData.weekRange,
                     color = WhiteText.copy(alpha = 0.8f),
-                    fontSize = 12.sp
+                    fontSize = 8.sp
                 )
 
-                Spacer(modifier = Modifier.height(4.dp))
+                Spacer(modifier = Modifier.height(1.dp))
 
                 // Bar Chart
                 WeeklyStepChart(
@@ -220,10 +230,10 @@ fun StepAnalyticsScreen(state: StepAnalyticsUiState) {
                     stepGoal = state.weeklyData.stepGoal,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(100.dp)
+                        .height(70.dp)
                 )
 
-                Spacer(modifier = Modifier.height(4.dp))
+                Spacer(modifier = Modifier.height(2.dp))
 
                 // Weekly Summary
                 WeeklySummaryCard(summary = state.weeklyData)
@@ -238,39 +248,56 @@ fun WeeklyStepChart(
     stepGoal: Int,
     modifier: Modifier = Modifier
 ) {
-    if (data.isEmpty()) return
+    // If no data, bail early with placeholder
+    if (data.isEmpty() || stepGoal <= 0) {
+        Box(modifier = modifier, contentAlignment = Alignment.Center) {
+            Text("No step data available", color = WhiteText.copy(alpha = 0.7f), fontSize = 12.sp)
+        }
+        return
+    }
 
-    val maxSteps = maxOf(data.maxOfOrNull { it.stepCount } ?: 0, stepGoal)
+    // Merge in today's live step count (replace entry for today)
+    val today = LocalDate.now()
+    val liveSteps = SimulationManager.getCumulativeSteps()
+    val mergedData = data.map { daily ->
+        if (daily.date == today) {
+            daily.copy(stepCount = liveSteps, goalAchieved = liveSteps >= stepGoal)
+        } else daily
+    }
 
-    // 👇 state for zoom + scroll
-    var scale by remember { mutableStateOf(1f) }
-    var offsetX by remember { mutableStateOf(0f) }
+    // Safeguard max
+    val maxSteps = maxOf(mergedData.maxOfOrNull { it.stepCount } ?: 0, stepGoal)
+    val safeMax = if (maxSteps > 0) maxSteps.toFloat() else 1f
+
+    // Zoom + scroll state
+    var scale by remember { mutableFloatStateOf(1f) }
+    var offsetX by remember { mutableFloatStateOf(0f) }
 
     Canvas(
-        modifier = modifier
-            .pointerInput(Unit) {
-                detectTransformGestures { _, pan, zoom, _ ->
-                    // Apply zoom (limit between 1x and 3x)
-                    scale = (scale * zoom).coerceIn(1f, 3f)
-
-                    // Apply horizontal pan (scroll)
-                    offsetX += pan.x
-                }
+        modifier = modifier.pointerInput(Unit) {
+            detectTransformGestures { _, pan, zoom, _ ->
+                scale = (scale * zoom).coerceIn(1f, 3f)
+                offsetX += pan.x
             }
+        }
     ) {
         val canvasWidth = size.width
         val canvasHeight = size.height
 
         // Adjust bar width based on zoom
-        val barWidth = (canvasWidth / (data.size * 1.5f)) * scale
+        val barWidth = (canvasWidth / (mergedData.size * 1.5f)) * scale
         val spacing = barWidth * 0.3f
 
         // Keep scrolling within bounds
-        val totalWidth = data.size * (barWidth + spacing)
-        offsetX = offsetX.coerceIn(-(totalWidth - canvasWidth), 0f)
+        val totalWidth = mergedData.size * (barWidth + spacing)
+        if (totalWidth > canvasWidth) {
+            offsetX = offsetX.coerceIn(-(totalWidth - canvasWidth), 0f)
+        } else {
+            offsetX = 0f
+        }
 
         // Goal line
-        val goalY = canvasHeight * (1 - stepGoal.toFloat() / maxSteps)
+        val goalY = canvasHeight * (1 - stepGoal.toFloat() / safeMax)
         drawLine(
             color = CyanHZ,
             start = Offset(0f, goalY),
@@ -280,14 +307,16 @@ fun WeeklyStepChart(
         )
 
         // Bars
-        data.forEachIndexed { index, dayData ->
-            val barHeight = (dayData.stepCount.toFloat() / maxSteps) * canvasHeight
+        mergedData.forEachIndexed { index, dayData ->
+            val ratio = (dayData.stepCount.toFloat() / safeMax).coerceIn(0f, 1f)
+            val barHeight = ratio * canvasHeight
+
             val x = index * (barWidth + spacing) + spacing + offsetX
             val y = canvasHeight - barHeight
 
-            if (x + barWidth < 0 || x > canvasWidth) return@forEachIndexed // Skip offscreen bars
+            if (x + barWidth < 0 || x > canvasWidth) return@forEachIndexed
 
-            val barColor = if (dayData.goalAchieved) follicleGreen else lutealPurple.copy(alpha = 0.7f)
+            val barColor = if (dayData.goalAchieved) follicleGreen else CyanHZ
 
             drawRect(
                 color = barColor,
@@ -295,22 +324,23 @@ fun WeeklyStepChart(
                 size = Size(barWidth, barHeight)
             )
 
-            // Draw day labels
+            // Day labels
             drawContext.canvas.nativeCanvas.apply {
                 drawText(
                     dayData.dayOfWeek,
                     x + barWidth / 2,
-                    canvasHeight + 20.dp.toPx(),
+                    canvasHeight + 10.dp.toPx(),
                     android.graphics.Paint().apply {
                         color = android.graphics.Color.WHITE
                         textAlign = android.graphics.Paint.Align.CENTER
-                        textSize = 10.sp.toPx()
+                        textSize = 5.sp.toPx()
                     }
                 )
             }
         }
     }
 }
+
 
 @Composable
 fun WeeklySummaryCard(summary: WeeklyStepSummary) {
@@ -384,10 +414,20 @@ private fun formatLargeNumber(number: Int): String {
 }
 
 class StepAnalyticsViewModelFactory(
-    private val context: android.content.Context
+    private val context: Context,
+    private val tileStepCount: Int = -1
 ) : androidx.lifecycle.ViewModelProvider.Factory {
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
-        return StepAnalyticsViewModel(context) as T
+        return StepAnalyticsViewModel(context, tileStepCount) as T
+    }
+}
+private fun getCycleColor(phase: CyclePhase): Color {
+    return when (phase) {
+        CyclePhase.MENSTRUATION -> Color(0xFFFF0000)
+        CyclePhase.FOLLICULAR -> Color(0xFF4CAF50)
+        CyclePhase.OVULATION -> Color(0xFFff66c4)
+        CyclePhase.LUTEAL -> Color(0xFF9C27B0)
+        else -> Color.Gray
     }
 }
 
