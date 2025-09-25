@@ -65,9 +65,21 @@
             android:value="true" />
         <activity
             android:name=".presentation.StepAnalyticsActivity"
-            android:exported="false"
+            android:exported="true"
             android:taskAffinity=""
-            android:theme="@android:style/Theme.DeviceDefault" />
+            android:launchMode="singleTask"
+            android:theme="@android:style/Theme.DeviceDefault">
+            <!-- Custom action for step analytics from tile -->
+            <intent-filter>
+                <action android:name="com.example.honoursproject.STEP_ANALYTICS" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+            <!-- Fallback intent filter -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
         <activity
             android:name=".presentation.MainActivity"
             android:exported="true"

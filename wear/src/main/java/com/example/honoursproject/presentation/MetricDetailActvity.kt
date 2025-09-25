@@ -18,6 +18,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.*
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.res.painterResource
@@ -26,6 +27,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.wear.compose.material.CircularProgressIndicator
 import androidx.wear.compose.material.Text
@@ -58,7 +60,8 @@ sealed class MetricUiState {
         val cyclePhase: String,
         val minValue: Float,
         val maxValue: Float,
-        val latestValue: Float
+        val latestValue: Float,
+        val cycleData: Map<Long, CyclePhase> = emptyMap()
     ) : MetricUiState()
     data class Error(val message: String) : MetricUiState()
 }
@@ -81,7 +84,7 @@ class MetricDetailViewModel(
         ZoomLevel("6H", 6, "HH:mm"),
         ZoomLevel("12H", 12, "HH:mm"),
         ZoomLevel("1D", 24, "HH:mm"),
-        ZoomLevel("7D", 168, "MMM dd")
+        ZoomLevel("7D", 168, "dd MMM")
     )
 
     private var currentZoomIndex = 0
@@ -109,13 +112,26 @@ class MetricDetailViewModel(
 
     fun scrollLeft() {
         val zoomLevel = zoomLevels[currentZoomIndex]
-        currentTimeOffset -= zoomLevel.hours / 4 // Scroll by quarter of the current view
+        // Use smaller scroll increments for better control
+        val scrollIncrement = when {
+            zoomLevel.hours <= 2 -> 0.25 // 15 minutes
+            zoomLevel.hours <= 12 -> 0.5 // 30 minutes
+            zoomLevel.hours <= 24 -> 1.0 // 1 hour
+            else -> 6.0 // 6 hours for weekly view
+        }
+        currentTimeOffset -= scrollIncrement.toLong()
         loadData()
     }
 
     fun scrollRight() {
         val zoomLevel = zoomLevels[currentZoomIndex]
-        currentTimeOffset += zoomLevel.hours / 4
+        val scrollIncrement = when {
+            zoomLevel.hours <= 2 -> 0.25
+            zoomLevel.hours <= 12 -> 0.5
+            zoomLevel.hours <= 24 -> 1.0
+            else -> 6.0
+        }
+        currentTimeOffset += scrollIncrement.toLong()
 
         // Don't scroll into the future beyond current time
         if (EvaluationState.isEvaluationMode.value) {
@@ -127,22 +143,29 @@ class MetricDetailViewModel(
     }
 
     fun canScrollLeft(): Boolean {
-        // In evaluation mode, limit scrolling to historical data bounds
-        if (EvaluationState.isEvaluationMode.value) {
-            val zoomLevel = zoomLevels[currentZoomIndex]
-            if (zoomLevel.hours > 24) {
-                // Weekly view - can't scroll beyond historical range
-                return false
-            } else {
-                // Daily view - can scroll to start of day
-                val maxOffset = 24L - zoomLevel.hours
-                return currentTimeOffset > -maxOffset
-            }
+        val zoomLevel = zoomLevels[currentZoomIndex]
+        val now = if (EvaluationState.isEvaluationMode.value) {
+            // In evaluation mode, use the current date with evaluation time data
+            LocalDateTime.now()
+        } else {
+            LocalDateTime.now()
         }
-        return true // In normal mode, can always scroll back
+        val endTimeWithOffset = now.plusHours(currentTimeOffset)
+
+        return if (zoomLevel.hours < 168) { // Hourly views
+            val startOfDay = now.toLocalDate().atStartOfDay()
+            endTimeWithOffset.minusHours(zoomLevel.hours).isAfter(startOfDay)
+        } else { // Weekly view
+            val startOfDataRange = if (EvaluationState.isEvaluationMode.value) {
+                LocalDate.of(2023, 8, 1).atStartOfDay()
+            } else {
+                now.minusDays(30).toLocalDate().atStartOfDay() // Allow 30 days back
+            }
+            endTimeWithOffset.minusHours(zoomLevel.hours).isAfter(startOfDataRange)
+        }
     }
 
-    fun canScrollRight(): Boolean {
+        fun canScrollRight(): Boolean {
         return currentTimeOffset < 0 // Can only scroll right if we're in the past
     }
 
@@ -162,6 +185,44 @@ class MetricDetailViewModel(
                 _uiState.value = MetricUiState.Error("Failed to load data: ${e.message}")
             }
         }
+    }
+
+    // Helper function to get cycle data for a date range
+    private suspend fun getCycleDataForRange(startDate: LocalDate, endDate: LocalDate): Map<Long, CyclePhase> {
+        val cycleData = mutableMapOf<Long, CyclePhase>()
+
+        // Get cycle records for the date range
+        val startTimestamp = startDate.atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
+        val endTimestamp = endDate.atTime(23, 59, 59).atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
+
+        try {
+            val archiveRecords = archiveDao.getRecordsBetween(startTimestamp, endTimestamp)
+
+            // Group by date and get the most common cycle phase for each day
+            archiveRecords.groupBy { record ->
+                Instant.ofEpochMilli(record.timestamp)
+                    .atZone(ZoneId.systemDefault())
+                    .toLocalDate()
+            }.forEach { (date, records) ->
+                val dayTimestamp = date.atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
+                val mostCommonPhase = records
+                    .groupingBy {
+                        try {
+                            CyclePhase.valueOf(it.cyclePhase.uppercase())
+                        } catch (e: IllegalArgumentException) {
+                            CyclePhase.UNKNOWN
+                        }
+                    }
+                    .eachCount()
+                    .maxByOrNull { it.value }?.key ?: CyclePhase.UNKNOWN
+
+                cycleData[dayTimestamp] = mostCommonPhase
+            }
+        } catch (e: Exception) {
+            Log.e("MetricDetailViewModel", "Error getting cycle data", e)
+        }
+
+        return cycleData
     }
 
     // Load data for evaluation mode
@@ -285,14 +346,17 @@ class MetricDetailViewModel(
                 }
                 .sortedBy { it.time }
 
+            // Get cycle data for the historical range
+            val startDate = LocalDate.of(2023, 8, 1)
+            val endDate = LocalDate.of(2023, 8, 12)
+            val cycleData = getCycleDataForRange(startDate, endDate)
+
             if (dailyData.isNotEmpty()) {
                 val minVal = dailyData.minOf { it.value }
                 val maxVal = dailyData.maxOf { it.value }
                 val latestVal = dailyData.lastOrNull()?.value ?: 0f
                 val liveRecord = SimulationManager.healthDataStream.value
 
-                val startDate = LocalDate.of(2023, 8, 1)
-                val endDate = LocalDate.of(2023, 8, 12)
                 val timeRange = TimeRange(
                     startDate.atStartOfDay(),
                     endDate.atTime(23, 59, 59)
@@ -306,7 +370,8 @@ class MetricDetailViewModel(
                     cyclePhase = liveRecord.cyclePhase,
                     minValue = minVal,
                     maxValue = maxVal,
-                    latestValue = latestVal
+                    latestValue = latestVal,
+                    cycleData = cycleData
                 )
             } else {
                 _uiState.value = MetricUiState.Error("No historical data processed")
@@ -409,6 +474,11 @@ class MetricDetailViewModel(
                     }
                     .sortedBy { it.time }
 
+                // Get cycle data for the time range
+                val startDate = timeRange.start.toLocalDate()
+                val endDate = timeRange.end.toLocalDate()
+                val cycleData = getCycleDataForRange(startDate, endDate)
+
                 if (dailyData.isNotEmpty()) {
                     val minVal = dailyData.minOf { it.value }
                     val maxVal = dailyData.maxOf { it.value }
@@ -423,7 +493,8 @@ class MetricDetailViewModel(
                         cyclePhase = liveRecord.cyclePhase,
                         minValue = minVal,
                         maxValue = maxVal,
-                        latestValue = latestVal
+                        latestValue = latestVal,
+                        cycleData = cycleData
                     )
                 } else {
                     _uiState.value = MetricUiState.Error("No weekly data available")
@@ -522,14 +593,6 @@ fun MetricDetailScreen(
                     )
                 }
 
-                // Zoom level indicator
-                Text(
-                    text = state.zoomLevel.name,
-                    color = WhiteText,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold
-                )
-
                 // Interactive graph
                 InteractiveLineGraph(
                     data = state.graphData,
@@ -547,15 +610,19 @@ fun MetricDetailScreen(
                     isEvaluationMode = isEvaluationMode,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(70.dp)
+                        .height(70.dp),
+                    cycleData = state.cycleData
                 )
 
-                // Control hints
+                // Time range label below the graph
                 Text(
-                    text = "Drag: scroll • Double-tap: zoom",
-                    color = WhiteText.copy(alpha = 0.6f),
-                    fontSize = 8.sp,
-                    textAlign = TextAlign.Center
+                    text = when {
+                        state.zoomLevel.hours >= 24 -> "Past ${state.zoomLevel.hours / 24} Days"
+                        else -> "Past ${state.zoomLevel.hours} Hours"
+                    },
+                    color = WhiteText,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Normal
                 )
 
                 // Cycle information
@@ -604,6 +671,7 @@ fun InteractiveLineGraph(
     canScrollLeft: Boolean,
     canScrollRight: Boolean,
     isEvaluationMode: Boolean,
+    cycleData: Map<Long, CyclePhase>,
     lineColor: Color = WhiteText,
     gridColor: Color = Color.White.copy(alpha = 0.2f)
 ) {
@@ -614,25 +682,38 @@ fun InteractiveLineGraph(
         return
     }
 
+    var isDragging by remember { mutableStateOf(false) }
+    var dragStartX by remember { mutableStateOf(0f) }
+
     Box(modifier = modifier) {
         Canvas(
             modifier = Modifier
                 .fillMaxSize()
                 .pointerInput(Unit) {
                     detectDragGestures(
+                        onDragStart = { offset ->
+                            isDragging = true
+                            dragStartX = offset.x
+                        },
                         onDragEnd = {
-                            // Optional: Add haptic feedback or animation here
-                        }
-                    ) { change, _ ->
-                        val dragX = change.position.x
-                        if (abs(dragX) > 15) {
-                            if (dragX > 0 && canScrollLeft) {
-                                onScrollLeft()
-                            } else if (dragX < 0 && canScrollRight) {
-                                onScrollRight()
+                            isDragging = false
+                        },
+                        onDrag = { change, dragAmount ->
+                            // More sensitive drag detection
+                            val totalDragX = change.position.x - dragStartX
+
+                            // Lower threshold for more responsive scrolling
+                            if (abs(totalDragX) > 5f) {
+                                if (totalDragX > 0 && canScrollLeft) {
+                                    onScrollLeft()
+                                    dragStartX = change.position.x // Update start position
+                                } else if (totalDragX < 0 && canScrollRight) {
+                                    onScrollRight()
+                                    dragStartX = change.position.x // Update start position
+                                }
                             }
                         }
-                    }
+                    )
                 }
                 .pointerInput(Unit) {
                     detectTapGestures(
@@ -651,20 +732,11 @@ fun InteractiveLineGraph(
             val canvasHeight = size.height
             val yRange = (maxValue - minValue).takeIf { it > 0 } ?: 1f
 
-            // Draw grid
-            (0..3).forEach { i ->
-                val y = canvasHeight * i / 3
-                drawLine(
-                    gridColor,
-                    Offset(0f, y),
-                    Offset(canvasWidth, y),
-                    strokeWidth = 1.dp.toPx()
-                )
-            }
+            // Enhanced grid with time markers
+            drawTimeGrid(canvasWidth, canvasHeight, gridColor, data, timeRange, zoomLevel)
 
-            // Draw data line
-            val path = Path()
-            val fillPath = Path()
+            // Enhanced Y-axis labels
+            drawYAxisLabels(canvasHeight, minValue, maxValue, gridColor)
 
             fun getPoint(dataPoint: DataPoint, index: Int): Offset {
                 val x = canvasWidth * index / (data.size - 1).coerceAtLeast(1)
@@ -673,107 +745,345 @@ fun InteractiveLineGraph(
             }
 
             if (data.isNotEmpty()) {
+                // Draw gradient fill
                 val firstPoint = getPoint(data.first(), 0)
-                path.moveTo(firstPoint.x, firstPoint.y)
+                val fillPath = Path()
                 fillPath.moveTo(0f, canvasHeight)
                 fillPath.lineTo(firstPoint.x, firstPoint.y)
 
                 for (i in 1 until data.size) {
                     val point = getPoint(data[i], i)
-                    path.lineTo(point.x, point.y)
                     fillPath.lineTo(point.x, point.y)
                 }
 
                 fillPath.lineTo(canvasWidth, canvasHeight)
                 fillPath.close()
 
-                // Draw gradient fill
                 drawPath(
                     fillPath,
                     brush = Brush.verticalGradient(
-                        listOf(lineColor.copy(alpha = 0.3f), Color.Transparent)
+                        listOf(lineColor.copy(alpha = 0.2f), Color.Transparent)
                     )
                 )
 
-                // Draw main line
-                drawPath(path, color = lineColor, style = Stroke(width = 2.dp.toPx()))
+                // Draw line with cycle colors for weekly view
+                drawDataLine(data, zoomLevel, cycleData, lineColor, ::getPoint)
 
-                // Draw latest point indicator
+                // Enhanced latest point indicator
                 val latestPoint = getPoint(data.last(), data.size - 1)
-                drawCircle(
-                    Color.White,
-                    radius = 3.dp.toPx(),
-                    center = latestPoint
-                )
-
-                // Draw a subtle pulse effect for the latest point
-                drawCircle(
-                    lineColor.copy(alpha = 0.3f),
-                    radius = 6.dp.toPx(),
-                    center = latestPoint
-                )
+                drawLatestPointIndicator(latestPoint, lineColor)
             }
         }
 
-        // Value display
-        Text(
-            text = "%.0f".format(latestValue),
-            color = Color.White,
-            fontSize = 9.sp,
-            modifier = Modifier.align(Alignment.TopEnd).padding(2.dp)
+        // Enhanced time labels with cycle information
+        EnhancedTimeLabels(
+            timeRange = timeRange,
+            zoomLevel = zoomLevel,
+            isEvaluationMode = isEvaluationMode,
+            data = data,
+            cycleData = cycleData,
+            modifier = Modifier.align(Alignment.BottomCenter)
         )
 
-        // Time labels - adjusted for evaluation mode
+        // Value display with trend indicator
+        ValueDisplay(
+            latestValue = latestValue,
+            data = data,
+            modifier = Modifier.align(Alignment.TopEnd)
+        )
+
+        // Enhanced scroll indicators
+        ScrollIndicators(
+            canScrollLeft = canScrollLeft,
+            canScrollRight = canScrollRight,
+            isDragging = isDragging,
+            modifier = Modifier
+        )
+    }
+}
+private fun DrawScope.drawTimeGrid(
+    canvasWidth: Float,
+    canvasHeight: Float,
+    gridColor: Color,
+    data: List<DataPoint>,
+    timeRange: TimeRange,
+    zoomLevel: ZoomLevel
+) {
+    // Horizontal grid lines
+    (0..4).forEach { i ->
+        val y = canvasHeight * i / 4
+        drawLine(
+            gridColor.copy(alpha = 0.3f),
+            Offset(0f, y),
+            Offset(canvasWidth, y),
+            strokeWidth = 1.dp.toPx()
+        )
+    }
+
+    // Vertical time markers (every few hours or days depending on zoom)
+    val markerCount = when {
+        zoomLevel.hours <= 2 -> 4 // Every 30 minutes
+        zoomLevel.hours <= 12 -> 6 // Every 2 hours
+        zoomLevel.hours <= 24 -> 8 // Every 3 hours
+        else -> 7 // Every day for weekly
+    }
+
+    (0..markerCount).forEach { i ->
+        val x = canvasWidth * i / markerCount
+        drawLine(
+            gridColor.copy(alpha = 0.2f),
+            Offset(x, 0f),
+            Offset(x, canvasHeight),
+            strokeWidth = 0.5.dp.toPx()
+        )
+    }
+}
+
+private fun DrawScope.drawYAxisLabels(
+    canvasHeight: Float,
+    minValue: Float,
+    maxValue: Float,
+    gridColor: Color
+) {
+    // Could add Y-axis value labels here if needed
+    // For now, just the enhanced grid
+}
+
+private fun DrawScope.drawDataLine(
+    data: List<DataPoint>,
+    zoomLevel: ZoomLevel,
+    cycleData: Map<Long, CyclePhase>,
+    lineColor: Color,
+    getPoint: (DataPoint, Int) -> Offset
+) {
+    if (zoomLevel.hours >= 168 && cycleData.isNotEmpty()) {
+        // Draw line segments with cycle phase colors for weekly view
+        for (i in 1 until data.size) {
+            val prevPoint = getPoint(data[i - 1], i - 1)
+            val currentPoint = getPoint(data[i], i)
+
+            val dataPointDate = Instant.ofEpochMilli(data[i - 1].time)
+                .atZone(ZoneId.systemDefault())
+                .toLocalDate()
+                .atStartOfDay(ZoneId.systemDefault())
+                .toInstant()
+                .toEpochMilli()
+
+            val phase = cycleData[dataPointDate] ?: CyclePhase.UNKNOWN
+            val phaseColor = getCycleColor(phase)
+
+            drawLine(
+                color = phaseColor,
+                start = prevPoint,
+                end = currentPoint,
+                strokeWidth = 3.dp.toPx(),
+                cap = StrokeCap.Round
+            )
+        }
+    } else {
+        // Single-colored line for hourly views
+        for (i in 1 until data.size) {
+            val prevPoint = getPoint(data[i - 1], i - 1)
+            val currentPoint = getPoint(data[i], i)
+
+            drawLine(
+                color = lineColor,
+                start = prevPoint,
+                end = currentPoint,
+                strokeWidth = 3.dp.toPx(),
+                cap = StrokeCap.Round
+            )
+        }
+    }
+}
+
+private fun DrawScope.drawLatestPointIndicator(latestPoint: Offset, lineColor: Color) {
+    // Outer pulse ring
+    drawCircle(
+        lineColor.copy(alpha = 0.3f),
+        radius = 8.dp.toPx(),
+        center = latestPoint
+    )
+    // Inner solid circle
+    drawCircle(
+        Color.White,
+        radius = 4.dp.toPx(),
+        center = latestPoint
+    )
+    // Center dot
+    drawCircle(
+        lineColor,
+        radius = 2.dp.toPx(),
+        center = latestPoint
+    )
+}
+
+@Composable
+private fun EnhancedTimeLabels(
+    timeRange: TimeRange,
+    zoomLevel: ZoomLevel,
+    isEvaluationMode: Boolean,
+    data: List<DataPoint>,
+    cycleData: Map<Long, CyclePhase>,
+    modifier: Modifier = Modifier
+) {
+    Column(modifier = modifier.fillMaxWidth()) {
+        // Main time range
         Row(
-            modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth(),
+            modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            val formatter = DateTimeFormatter.ofPattern(zoomLevel.displayFormat)
+            val formatter = DateTimeFormatter.ofPattern(
+                if (zoomLevel.hours >= 24) "dd MMM" else "HH:mm"
+            )
 
             Text(
                 text = if (isEvaluationMode && zoomLevel.hours > 24) {
-                    "Historical"
+                    "Aug 1"
                 } else {
                     timeRange.start.format(formatter)
                 },
                 color = WhiteText.copy(alpha = 0.7f),
-                fontSize = 7.sp
+                fontSize = 8.sp
             )
+
+            // Show cycle day for weekly view
+            if (zoomLevel.hours >= 24 && data.isNotEmpty()) {
+                val midPointTime = data[data.size / 2].time
+                val cyclePhase = cycleData.entries.minByOrNull {
+                    abs(it.key - midPointTime)
+                }?.value
+
+                if (cyclePhase != null && cyclePhase != CyclePhase.UNKNOWN) {
+                    Text(
+                        text = cyclePhase.name.take(3),
+                        color = getCycleColor(cyclePhase),
+                        fontSize = 7.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
 
             Text(
                 text = if (isEvaluationMode && zoomLevel.hours > 24) {
-                    "Aug 1-12"
+                    "Aug 12"
                 } else {
                     timeRange.end.format(formatter)
                 },
                 color = WhiteText.copy(alpha = 0.7f),
-                fontSize = 7.sp
+                fontSize = 8.sp
             )
         }
 
-        // Scroll indicators
-        if (!canScrollLeft) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.CenterStart)
-                    .size(12.dp)
-                    .background(
-                        Color.Gray.copy(alpha = 0.5f),
-                        CircleShape
-                    )
+        // Time period indicator
+        Text(
+            text = when {
+                zoomLevel.hours >= 24 -> "${zoomLevel.hours / 24}D View"
+                else -> "${zoomLevel.hours}H View"
+            },
+            color = WhiteText.copy(alpha = 0.5f),
+            fontSize = 7.sp,
+            modifier = Modifier.align(Alignment.CenterHorizontally)
+        )
+    }
+}
+
+@Composable
+private fun ValueDisplay(
+    latestValue: Float,
+    data: List<DataPoint>,
+    modifier: Modifier = Modifier
+) {
+    val trend = if (data.size >= 2) {
+        val current = data.last().value
+        val previous = data[data.size - 2].value
+        when {
+            current > previous -> "↗"
+            current < previous -> "↘"
+            else -> "→"
+        }
+    } else ""
+
+    Column(
+        modifier = modifier.padding(4.dp),
+        horizontalAlignment = Alignment.End
+    ) {
+        Text(
+            text = "%.1f".format(latestValue),
+            color = Color.White,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold
+        )
+        if (trend.isNotEmpty()) {
+            Text(
+                text = trend,
+                color = when (trend) {
+                    "↗" -> Color.Green
+                    "↘" -> Color.Red
+                    else -> Color.Gray
+                },
+                fontSize = 10.sp
             )
         }
+    }
+}
 
-        if (!canScrollRight) {
+@Composable
+private fun ScrollIndicators(
+    canScrollLeft: Boolean,
+    canScrollRight: Boolean,
+    isDragging: Boolean,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier.fillMaxSize(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        // Left scroll indicator
+        if (canScrollLeft) {
             Box(
                 modifier = Modifier
-                    .align(Alignment.CenterEnd)
-                    .size(12.dp)
+                    .size(16.dp)
                     .background(
-                        Color.Gray.copy(alpha = 0.5f),
+                        Color.White.copy(
+                            alpha = if (isDragging) 0.8f else 0.3f
+                        ),
                         CircleShape
-                    )
-            )
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    "‹",
+                    color = Color.Black,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.weight(1f))
+
+        // Right scroll indicator
+        if (canScrollRight) {
+            Box(
+                modifier = Modifier
+                    .size(16.dp)
+                    .background(
+                        Color.White.copy(
+                            alpha = if (isDragging) 0.8f else 0.3f
+                        ),
+                        CircleShape
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    "›",
+                    color = Color.Black,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
         }
     }
 }
@@ -792,7 +1102,7 @@ private fun getCycleColor(phase: CyclePhase): Color {
 class MetricDetailViewModelFactory(
     private val metricType: String,
     private val context: Context
-) : androidx.lifecycle.ViewModelProvider.Factory {
+) : ViewModelProvider.Factory {
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         return MetricDetailViewModel(metricType, context) as T
     }

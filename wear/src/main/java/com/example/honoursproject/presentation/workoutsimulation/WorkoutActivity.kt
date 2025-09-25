@@ -18,6 +18,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -49,7 +50,6 @@ import kotlin.math.roundToInt
 // --- Activity ---
 class WorkoutActivity : ComponentActivity() {
 
-    // MODIFIED: viewModel is now declared here, but initialized later
     private lateinit var viewModel: WorkoutViewModel
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -58,7 +58,6 @@ class WorkoutActivity : ComponentActivity() {
         val workoutType = intent.getStringExtra("workout_type") ?: "run"
         val workoutDurationMinutes = intent.getIntExtra("workout_duration", 30)
 
-        // MODIFIED: Handle start time robustly from a string extra
         val workoutStartTimeString = intent.getStringExtra("workout_start_time")
         val actualStartTime = try {
             LocalDateTime.parse(workoutStartTimeString)
@@ -68,8 +67,7 @@ class WorkoutActivity : ComponentActivity() {
         }
         val actualEndTime = actualStartTime.plusMinutes(workoutDurationMinutes.toLong())
 
-        // NEW: Notify the manager that this workout was started by the user
-        // This is the key to preventing a duplicate, automatic launch.
+        // Notify the manager that this workout was started by the user
         WorkoutSimulationManager.userInitiatedWorkout(actualStartTime)
 
         lifecycleScope.launch {
@@ -93,8 +91,12 @@ class WorkoutActivity : ComponentActivity() {
                         val isStopped by viewModel.isStopped.collectAsState()
                         val zoneDistribution by viewModel.zoneDistribution.collectAsState()
                         val screenState by viewModel.screenState.collectAsState()
-                        val isCountingDown by viewModel.isCountingDown.collectAsState()
                         val countdownValue by viewModel.countdownValue.collectAsState()
+
+                        // Observe WorkoutSimulationManager states
+                        val workoutTimingState by WorkoutSimulationManager.workoutTimingState.collectAsState()
+                        val simulationProgress by viewModel.simulationProgress.collectAsState()
+
                         val navController = rememberNavController()
 
                         LaunchedEffect(isStopped) {
@@ -105,52 +107,95 @@ class WorkoutActivity : ComponentActivity() {
                             }
                         }
 
+                        // Remember evaluation mode state to avoid recomposition issues
+                        val isEvaluationMode by remember { derivedStateOf { EvaluationState.isEvaluationMode.value } }
+
                         NavHost(navController = navController, startDestination = "workout") {
                             composable("workout") {
-                                when (screenState) {
-                                    WorkoutScreenState.WAITING -> {
-                                        WaitingScreen()
-                                    }
-                                    WorkoutScreenState.COUNTING_DOWN -> {
-                                        CountdownScreen(countdownValue = countdownValue)
-                                    }
-                                    WorkoutScreenState.IN_PROGRESS -> {
-                                        WorkoutScreen(
-                                            elapsedTime = uiState.elapsedTime,
-                                            heartRate = uiState.heartRate,
-                                            distance = uiState.distance,
-                                            energy = uiState.energy,
-                                            cycleInfo = uiState.cycleInfo,
-                                            workoutType = workoutType,
-                                            isPaused = isPaused,
-                                            onPauseOrResumeClick = { viewModel.pauseOrResumeWorkout() },
-                                            onStopClick = { viewModel.stopWorkout() },
-                                            currentZone = uiState.heartZone
+                                when (val currentTimingState = workoutTimingState) {
+                                    // Handle WorkoutSimulationManager timing states first
+                                    is WorkoutTimingState.NotificationScheduled -> {
+                                        NotificationScheduledScreen(
+                                            workoutType = currentTimingState.workoutType,
+                                            timeRemaining = currentTimingState.timeRemaining
                                         )
+                                    }
+                                    is WorkoutTimingState.UserStartedEarly -> {
+                                        UserEarlyStartScreen(
+                                            workoutType = currentTimingState.workoutType,
+                                            timeToActualStart = currentTimingState.actualStartCountdown
+                                        )
+                                    }
+                                    is WorkoutTimingState.AutoStartCountdown -> {
+                                        AutoStartCountdownScreen(
+                                            workoutType = currentTimingState.workoutType,
+                                            countdown = currentTimingState.countdown
+                                        )
+                                    }
+                                    else -> {
+                                        // Fall back to local ViewModel states
+                                        when (screenState) {
+                                            WorkoutScreenState.WAITING -> {
+                                                WaitingScreen(simulationProgress = simulationProgress)
+                                            }
+                                            WorkoutScreenState.COUNTING_DOWN -> {
+                                                CountdownScreen(
+                                                    countdownValue = countdownValue,
+                                                    isEvaluationMode = isEvaluationMode
+                                                )
+                                            }
+                                            WorkoutScreenState.IN_PROGRESS -> {
+                                                WorkoutScreen(
+                                                    elapsedTime = uiState.elapsedTime,
+                                                    heartRate = uiState.heartRate,
+                                                    distance = uiState.distance,
+                                                    energy = uiState.energy,
+                                                    cycleInfo = uiState.cycleInfo,
+                                                    workoutType = workoutType,
+                                                    isPaused = isPaused,
+                                                    onPauseOrResumeClick = { viewModel.pauseOrResumeWorkout() },
+                                                    onStopClick = { viewModel.stopWorkout() },
+                                                    currentZone = uiState.heartZone,
+                                                    isEvaluationMode = isEvaluationMode,
+                                                    simulationProgress = simulationProgress
+                                                )
+                                            }
+                                        }
                                     }
                                 }
                             }
                             composable("summary") {
+                                // Use comprehensive summary from WorkoutSimulationManager if available
+                                val finalSummary = remember(workoutTimingState) {
+                                    when (val currentTimingState = workoutTimingState) {
+                                        is WorkoutTimingState.Finished -> currentTimingState.summary
+                                        else -> {
+                                            // Fallback to ViewModel-generated summary
+                                            WorkoutSummary(
+                                                details = WorkoutDetails(
+                                                    workoutType = workoutType,
+                                                    startTime = viewModel.startTime ?: LocalDateTime.now(),
+                                                    endTime = LocalDateTime.now(),
+                                                    distance = uiState.distance,
+                                                    duration = uiState.elapsedTime / 60.0,
+                                                    maxHeartRate = viewModel.heartRateHistory.maxOrNull()?.toDouble() ?: 0.0,
+                                                    avgHeartRate = uiState.avgHeartRate.toDouble(),
+                                                    totalEnergyBurned = (uiState.energy + uiState.basalEnergy).toDouble(),
+                                                    activeEnergy = uiState.energy.toDouble(),
+                                                    basalEnergy = uiState.basalEnergy.toDouble()
+                                                ),
+                                                cyclePhase = uiState.cycleInfo.phase.name,
+                                                cycleDay = uiState.cycleInfo.dayOfCycle,
+                                                dayOfCycle = uiState.cycleInfo.dayOfCycle,
+                                                heartZones = zoneDistribution
+                                            )
+                                        }
+                                    }
+                                }
+
                                 WorkoutSummaryScreen(
-                                    summary = WorkoutSummary(
-                                        details = WorkoutDetails(
-                                            workoutType = workoutType,
-                                            startTime = viewModel.startTime ?: LocalDateTime.now(),
-                                            endTime = LocalDateTime.now(),
-                                            distance = uiState.distance,
-                                            duration = uiState.elapsedTime / 60.0,
-                                            maxHeartRate = viewModel.heartRateHistory.maxOrNull()?.toDouble() ?: 0.0,
-                                            avgHeartRate = uiState.avgHeartRate.toDouble(),
-                                            totalEnergyBurned = (uiState.energy + uiState.basalEnergy).toDouble(),
-                                            activeEnergy = uiState.energy.toDouble(),
-                                            basalEnergy = uiState.basalEnergy.toDouble()
-                                        ),
-                                        cyclePhase = uiState.cycleInfo.phase.name,
-                                        cycleDay = uiState.cycleInfo.dayOfCycle,
-                                        dayOfCycle = uiState.cycleInfo.dayOfCycle,
-                                        heartZones = zoneDistribution
-                                    ),
-                                    zoneDistribution = zoneDistribution,
+                                    summary = finalSummary,
+                                    zoneDistribution = finalSummary.heartZones,
                                     onDismiss = { finish() }
                                 )
                             }
@@ -161,8 +206,6 @@ class WorkoutActivity : ComponentActivity() {
         }
     }
 }
-// The rest of the file (ViewModel, Composables) remains unchanged.
-// The code below is identical to your original file.
 
 enum class WorkoutScreenState {
     WAITING,
@@ -202,7 +245,17 @@ data class WorkoutMetrics(
     val heartZone: HeartRateZone = HeartRateZone.ZONE_1
 )
 
-// --- ViewModel ---
+data class SimulationProgress(
+    val currentIndex: Int = 0,
+    val totalRecords: Int = 0,
+    val isSyncing: Boolean = false,
+    val isComplete: Boolean = false
+) {
+    val progressPercentage: Float
+        get() = if (totalRecords > 0) currentIndex.toFloat() / totalRecords.toFloat() else 0f
+}
+
+// --- Enhanced ViewModel ---
 class WorkoutViewModel(
     private val context: Context,
     private val workoutType: String,
@@ -212,14 +265,9 @@ class WorkoutViewModel(
 ) : ViewModel() {
     private val _screenState = MutableStateFlow(WorkoutScreenState.WAITING)
     val screenState = _screenState.asStateFlow()
-    private val _isCountingDown = MutableStateFlow(true)
-    val isCountingDown = _isCountingDown.asStateFlow()
 
     private val _countdownValue = MutableStateFlow(3)
     val countdownValue = _countdownValue.asStateFlow()
-
-    private val _elapsedTime = MutableStateFlow(0L)
-    val elapsedTime = _elapsedTime.asStateFlow()
 
     private val _zoneDistribution = MutableStateFlow(mapOf<Int, Long>())
     val zoneDistribution = _zoneDistribution.asStateFlow()
@@ -233,19 +281,43 @@ class WorkoutViewModel(
 
     private val _isStopped = MutableStateFlow(false)
     val isStopped: StateFlow<Boolean> = _isStopped.asStateFlow()
+
+    private val _simulationProgress = MutableStateFlow(SimulationProgress())
+    val simulationProgress: StateFlow<SimulationProgress> = _simulationProgress.asStateFlow()
+
     var heartRateHistory = mutableListOf<Int>()
     var startTime: LocalDateTime? = null
     private var pausedDuration = 0L
 
     private var workoutJob: Job? = null
     private var timerJob: Job? = null
+    private var progressJob: Job? = null
     private var initialStepCount = 0
     private var initialActiveEnergy = 0.0
     private var initialBasalEnergy = 0.0
     private var isFirstDataPoint = true
 
     init {
+        startProgressMonitoring()
         prepareForWorkout()
+    }
+
+    private fun startProgressMonitoring() {
+        progressJob = viewModelScope.launch {
+            while (isActive) {
+                val progress = SimulationManager.getCurrentProgress()
+                val isComplete = SimulationManager.isComplete()
+
+                _simulationProgress.value = SimulationProgress(
+                    currentIndex = progress.first,
+                    totalRecords = progress.second,
+                    isSyncing = false, // Could be enhanced to detect sync state
+                    isComplete = isComplete
+                )
+
+                delay(2000) // Update every 2 seconds
+            }
+        }
     }
 
     private fun prepareForWorkout() {
@@ -277,14 +349,14 @@ class WorkoutViewModel(
     }
 
     private fun calculateHeartRateZone(hr: Double, userAge: Int): HeartRateZone {
-        val maxHeartRate = SimulationManager.MAX_HEART_RATE - userAge
+        val maxHeartRate = 220 - userAge // Standardized with WorkoutSimulationManager
         val percentage = hr / maxHeartRate
         return when {
-            percentage >= 0.9 -> HeartRateZone.ZONE_5
-            percentage >= 0.8 -> HeartRateZone.ZONE_4
-            percentage >= 0.7 -> HeartRateZone.ZONE_3
-            percentage >= 0.6 -> HeartRateZone.ZONE_2
-            else -> HeartRateZone.ZONE_1
+            percentage >= 0.9 -> HeartRateZone.ZONE_5  // Zone 5: 90%+
+            percentage >= 0.8 -> HeartRateZone.ZONE_4  // Zone 4: 80-90%
+            percentage >= 0.7 -> HeartRateZone.ZONE_3  // Zone 3: 70-80%
+            percentage >= 0.6 -> HeartRateZone.ZONE_2  // Zone 2: 60-70%
+            else -> HeartRateZone.ZONE_1               // Zone 1: <60%
         }
     }
 
@@ -294,10 +366,9 @@ class WorkoutViewModel(
                 _countdownValue.value = i
                 delay(1000)
             }
-            _isCountingDown.value = false
-            _screenState.value = WorkoutScreenState.IN_PROGRESS // Transition to workout
+            _screenState.value = WorkoutScreenState.IN_PROGRESS
             startTimer()
-            startWorkout() // Start the actual data collection
+            startWorkout()
         }
     }
 
@@ -306,7 +377,8 @@ class WorkoutViewModel(
             while (currentCoroutineContext().isActive) {
                 delay(1000)
                 if (!_isPaused.value) {
-                    _elapsedTime.value++
+                    val currentElapsed = _uiState.value.elapsedTime + 1
+                    _uiState.value = _uiState.value.copy(elapsedTime = currentElapsed)
                 }
             }
         }
@@ -323,6 +395,7 @@ class WorkoutViewModel(
                     while (isPaused.value) {
                         delay(1000)
                     }
+
                     if (isFirstDataPoint && healthData.stepCount > 0) {
                         initialStepCount = healthData.stepCount
                         initialActiveEnergy = healthData.activeEnergyBurned
@@ -331,7 +404,6 @@ class WorkoutViewModel(
                     }
 
                     val heartZone = calculateHeartRateZone(healthData.heartRate, userAge)
-                    val newElapsedTime = ChronoUnit.SECONDS.between(startTime, LocalDateTime.now()) - pausedDuration
 
                     heartRateHistory.add(healthData.heartRate.toInt())
                     val newAvgHeartRate = heartRateHistory.average().roundToInt()
@@ -348,7 +420,6 @@ class WorkoutViewModel(
                     }
 
                     _uiState.value = _uiState.value.copy(
-                        elapsedTime = newElapsedTime,
                         heartRate = healthData.heartRate.toInt(),
                         distance = distanceInKm,
                         energy = activeEnergyInWorkout,
@@ -376,6 +447,7 @@ class WorkoutViewModel(
     fun stopWorkout() {
         workoutJob?.cancel()
         timerJob?.cancel()
+        progressJob?.cancel()
         _isStopped.value = true
     }
 
@@ -408,11 +480,14 @@ class WorkoutViewModel(
     }
 }
 
-
-// --- Composable Functions (moved outside the class to be top-level) ---
+// --- Enhanced Composable Functions ---
 
 @Composable
-fun WaitingScreen() {
+fun NotificationScheduledScreen(workoutType: String, timeRemaining: Long) {
+    val minutes = (timeRemaining / 60000).toInt()
+    val seconds = ((timeRemaining % 60000) / 1000).toInt()
+    val isEvaluationMode by remember { derivedStateOf { EvaluationState.isEvaluationMode.value } }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -421,20 +496,110 @@ fun WaitingScreen() {
     ) {
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
+            verticalArrangement = Arrangement.Center,
+            modifier = Modifier.padding(16.dp)
         ) {
+            if (isEvaluationMode) {
+                Text(
+                    text = "EVALUATION MODE",
+                    color = menstrualRed,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+            }
+
+            Image(
+                painterResource(id = R.drawable.heart_icon),
+                contentDescription = null,
+                modifier = Modifier.size(32.dp),
+                colorFilter = ColorFilter.tint(menstrualRed)
+            )
+            Spacer(modifier = Modifier.height(8.dp))
             Text(
-                text = "Waiting for workout to start...",
+                text = "Workout Notification Sent",
                 color = WhiteText,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Medium,
+                textAlign = TextAlign.Center
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = workoutType.uppercase(),
+                color = follicleGreen,
                 fontSize = 16.sp,
-                fontWeight = FontWeight.Medium
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = "Auto-start in ${String.format("%02d:%02d", minutes, seconds)}",
+                color = Color.Gray,
+                fontSize = 12.sp
             )
         }
     }
 }
 
 @Composable
-fun CountdownScreen(countdownValue: Int) {
+fun UserEarlyStartScreen(workoutType: String, timeToActualStart: Long) {
+    val minutes = (timeToActualStart / 60000).toInt()
+    val seconds = ((timeToActualStart % 60000) / 1000).toInt()
+    val isEvaluationMode by remember { derivedStateOf { EvaluationState.isEvaluationMode.value } }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(backgroundBlue),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+            modifier = Modifier.padding(16.dp)
+        ) {
+            if (isEvaluationMode) {
+                Text(
+                    text = "EVALUATION MODE",
+                    color = menstrualRed,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+            }
+
+            Text(
+                text = "Started Early!",
+                color = follicleGreen,
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = workoutType.uppercase(),
+                color = WhiteText,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Medium
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = "Workout begins in",
+                color = WhiteText,
+                fontSize = 12.sp
+            )
+            Text(
+                text = String.format("%02d:%02d", minutes, seconds),
+                color = menstrualRed,
+                fontSize = 24.sp,
+                fontWeight = FontWeight.Bold
+            )
+        }
+    }
+}
+
+@Composable
+fun AutoStartCountdownScreen(workoutType: String, countdown: Int) {
+    val isEvaluationMode by remember { derivedStateOf { EvaluationState.isEvaluationMode.value } }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -445,6 +610,112 @@ fun CountdownScreen(countdownValue: Int) {
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
         ) {
+            if (isEvaluationMode) {
+                Text(
+                    text = "EVALUATION MODE",
+                    color = menstrualRed,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+            }
+
+            Text(
+                text = "Auto-starting",
+                color = WhiteText,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Medium
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = workoutType.uppercase(),
+                color = follicleGreen,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            Text(
+                text = countdown.toString(),
+                color = menstrualRed,
+                fontSize = 48.sp,
+                fontWeight = FontWeight.Bold
+            )
+        }
+    }
+}
+
+@Composable
+fun WaitingScreen(simulationProgress: SimulationProgress) {
+    val isEvaluationMode by remember { derivedStateOf { EvaluationState.isEvaluationMode.value } }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(backgroundBlue),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            if (isEvaluationMode) {
+                Text(
+                    text = "EVALUATION MODE",
+                    color = menstrualRed,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+            }
+
+            Text(
+                text = "Waiting for workout to start...",
+                color = WhiteText,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Medium
+            )
+
+            if (simulationProgress.totalRecords > 0) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "Simulation: ${simulationProgress.currentIndex}/${simulationProgress.totalRecords}",
+                    color = Color.Gray,
+                    fontSize = 10.sp
+                )
+                if (simulationProgress.isSyncing) {
+                    Text(
+                        text = "Syncing data...",
+                        color = follicleGreen,
+                        fontSize = 10.sp
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun CountdownScreen(countdownValue: Int, isEvaluationMode: Boolean) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(backgroundBlue),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            if (isEvaluationMode) {
+                Text(
+                    text = "EVALUATION MODE",
+                    color = menstrualRed,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+            }
+
             Text(
                 text = "Starting in",
                 color = WhiteText,
@@ -473,7 +744,9 @@ fun WorkoutScreen(
     isPaused: Boolean,
     onPauseOrResumeClick: () -> Unit,
     onStopClick: () -> Unit,
-    currentZone: HeartRateZone
+    currentZone: HeartRateZone,
+    isEvaluationMode: Boolean,
+    simulationProgress: SimulationProgress
 ) {
     Box(
         modifier = Modifier.fillMaxSize().background(backgroundBlue),
@@ -484,21 +757,33 @@ fun WorkoutScreen(
             verticalArrangement = Arrangement.SpaceAround,
             modifier = Modifier.fillMaxSize().padding(12.dp)
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                val icon = if (workoutType.contains("walk", ignoreCase = true)) R.drawable.steps_icon else R.drawable.run_icon
-                Image(
-                    painterResource(id = icon),
-                    contentDescription = null,
-                    modifier = Modifier.size(20.dp),
-                    colorFilter = ColorFilter.tint(WhiteText)
-                )
-                Spacer(Modifier.width(6.dp))
-                Text(
-                    formatElapsedTime(elapsedTime),
-                    fontSize = 28.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = WhiteText
-                )
+            // Header with evaluation mode indicator
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                if (isEvaluationMode) {
+                    Text(
+                        text = "EVAL",
+                        color = menstrualRed,
+                        fontSize = 8.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    val icon = if (workoutType.contains("walk", ignoreCase = true)) R.drawable.steps_icon else R.drawable.run_icon
+                    Image(
+                        painterResource(id = icon),
+                        contentDescription = null,
+                        modifier = Modifier.size(20.dp),
+                        colorFilter = ColorFilter.tint(WhiteText)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        formatElapsedTime(elapsedTime),
+                        fontSize = 28.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = WhiteText
+                    )
+                }
             }
 
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -537,7 +822,17 @@ fun WorkoutScreen(
                     )
                 }
             }
-            Spacer(Modifier.height(16.dp))
+
+            // Simulation progress indicator (small)
+            if (simulationProgress.totalRecords > 0) {
+                Text(
+                    text = "Sim: ${(simulationProgress.progressPercentage * 100).roundToInt()}%",
+                    color = Color.Gray,
+                    fontSize = 8.sp
+                )
+            }
+
+            Spacer(Modifier.height(8.dp))
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -588,6 +883,7 @@ fun WorkoutSummaryScreen(
     onDismiss: () -> Unit
 ) {
     var showGraph by remember { mutableStateOf(false) }
+    val isEvaluationMode by remember { derivedStateOf { EvaluationState.isEvaluationMode.value } }
 
     Box(
         modifier = Modifier.fillMaxSize().background(backgroundBlue)
@@ -599,33 +895,63 @@ fun WorkoutSummaryScreen(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.SpaceAround
         ) {
-            Text("Workout Summary", style = MaterialTheme.typography.title3, color = WhiteText)
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                if (isEvaluationMode) {
+                    Text(
+                        text = "EVALUATION COMPLETE",
+                        color = menstrualRed,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                }
+                Text("Workout Summary", style = MaterialTheme.typography.title3, color = WhiteText)
+            }
 
             if (showGraph) {
                 HeartZoneGraph(zoneDistribution = zoneDistribution)
             } else {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                    MetricColumn(
-                        "TIME",
-                        formatElapsedTime(summary.details.duration.toLong() * 60)
-                    )
-                    MetricColumn("KCAL", summary.details.activeEnergy.roundToInt().toString())
-                }
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                    MetricColumn("KM", String.format("%.2f", summary.details.distance))
-                    MetricColumn("AVG HR", summary.details.avgHeartRate.roundToInt().toString())
-                }
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.clickable { showGraph = true }) {
-                    Image(
-                        painterResource(id = R.drawable.heart_icon),
-                        contentDescription = "View Heart Zones",
-                        modifier = Modifier.size(24.dp),
-                        colorFilter = ColorFilter.tint(menstrualRed)
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("View Zones", color = WhiteText, fontSize = 12.sp)
+                Column {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                        MetricColumn(
+                            "TIME",
+                            formatElapsedTime(summary.details.duration.toLong() * 60)
+                        )
+                        MetricColumn("KCAL", summary.details.activeEnergy.roundToInt().toString())
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                        MetricColumn("KM", String.format("%.2f", summary.details.distance))
+                        MetricColumn("AVG HR", summary.details.avgHeartRate.roundToInt().toString())
+                    }
+
+                    // Show heart zone data if available
+                    if (zoneDistribution.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.clickable { showGraph = true }
+                        ) {
+                            Image(
+                                painterResource(id = R.drawable.heart_icon),
+                                contentDescription = "View Heart Zones",
+                                modifier = Modifier.size(24.dp),
+                                colorFilter = ColorFilter.tint(menstrualRed)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("View Zones", color = WhiteText, fontSize = 12.sp)
+                        }
+                    }
+
+                    // Show cycle information if available
+                    if (summary.cyclePhase != null) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = "Cycle: ${summary.cyclePhase} (Day ${summary.dayOfCycle})",
+                            color = Color.Gray,
+                            fontSize = 10.sp
+                        )
+                    }
                 }
             }
             Text("Tap to dismiss", color = Color.Gray, fontSize = 10.sp)
@@ -678,18 +1004,32 @@ fun HeartZoneGraph(zoneDistribution: Map<Int, Long>) {
         ) {
             (1..5).forEach { zone ->
                 val zoneTime = zoneDistribution[zone] ?: 0L
-                val percentage = zoneTime / totalTime
+                val percentage = if (totalTime > 0) zoneTime / totalTime else 0f
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Box(
                         modifier = Modifier
                             .width(20.dp)
-                            .fillMaxHeight(percentage)
+                            .fillMaxHeight(percentage.coerceAtLeast(0.05f)) // Minimum height for visibility
                             .background(zoneColors[zone - 1])
                     )
+                    Spacer(modifier = Modifier.height(2.dp))
                     Text(zone.toString(), color = WhiteText, fontSize = 10.sp)
+                    if (zoneTime > 0) {
+                        Text(
+                            text = "${(zoneTime / 60)}m",
+                            color = Color.Gray,
+                            fontSize = 8.sp
+                        )
+                    }
                 }
             }
         }
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = "Total workout time: ${formatElapsedTime(totalTime.toLong())}",
+            color = Color.Gray,
+            fontSize = 10.sp
+        )
     }
 }
 
@@ -754,7 +1094,6 @@ fun formatElapsedTime(seconds: Long): String {
     return String.format("%02d:%02d", minutes, secs)
 }
 
-// Move the preview to top-level
 @Preview(device = "id:wearos_small_round", showSystemUi = true)
 @Composable
 private fun WorkoutScreenPreview() {
@@ -768,6 +1107,35 @@ private fun WorkoutScreenPreview() {
         distance = 2.54,
         isPaused = false,
         onPauseOrResumeClick = {},
-        onStopClick = {}
+        onStopClick = {},
+        isEvaluationMode = true,
+        simulationProgress = SimulationProgress(150, 200, false, false)
+    )
+}
+
+@Preview(device = "id:wearos_small_round", showSystemUi = true)
+@Composable
+private fun NotificationScheduledScreenPreview() {
+    NotificationScheduledScreen(
+        workoutType = "run",
+        timeRemaining = 180000 // 3 minutes
+    )
+}
+
+@Preview(device = "id:wearos_small_round", showSystemUi = true)
+@Composable
+private fun AutoStartCountdownScreenPreview() {
+    AutoStartCountdownScreen(
+        workoutType = "walk",
+        countdown = 15
+    )
+}
+
+@Preview(device = "id:wearos_small_round", showSystemUi = true)
+@Composable
+private fun UserEarlyStartScreenPreview() {
+    UserEarlyStartScreen(
+        workoutType = "run",
+        timeToActualStart = 120000 // 2 minutes
     )
 }

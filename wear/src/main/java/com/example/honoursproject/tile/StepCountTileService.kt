@@ -1,5 +1,6 @@
 package com.example.honoursproject.tile
 
+import android.annotation.SuppressLint
 import androidx.wear.protolayout.ActionBuilders
 import androidx.wear.protolayout.DimensionBuilders.dp
 import androidx.wear.protolayout.DimensionBuilders.degrees
@@ -38,7 +39,6 @@ import kotlinx.coroutines.launch
 import java.util.Locale
 import kotlin.math.min
 
-//data class MenstrualCycleInfo(val phase: CyclePhase, val dayOfCycle: Int)
 
 @OptIn(ExperimentalHorologistApi::class)
 class StepCountTileService : SuspendingTileService() {
@@ -47,6 +47,8 @@ class StepCountTileService : SuspendingTileService() {
 
     companion object {
         private const val CYCLE_ICON_ID = "cycle_icon"
+        // Define the custom action
+        const val ACTION_OPEN_STEP_ANALYTICS = "com.example.honoursproject.STEP_ANALYTICS"
     }
 
     override fun onCreate() {
@@ -154,8 +156,8 @@ class StepCountTileService : SuspendingTileService() {
                                 ActionBuilders.LaunchAction.Builder()
                                     .setAndroidActivity(
                                         ActionBuilders.AndroidActivity.Builder()
-                                            .setClassName("com.example.honoursproject.presentation.StepAnalyticsActivity")
                                             .setPackageName(packageName)
+                                            .setClassName("com.example.honoursproject.presentation.StepAnalyticsActivity")
                                             .build()
                                     )
                                     .build()
@@ -169,8 +171,11 @@ class StepCountTileService : SuspendingTileService() {
             .build()
     }
 
-    private fun createProgressArc(progressDegrees: Int,goalAchieved: Boolean): LayoutElementBuilders.LayoutElement {
+    @SuppressLint("RestrictedApi")
+    private fun createProgressArc(progressDegrees: Int, goalAchieved: Boolean): LayoutElementBuilders.LayoutElement {
         return Arc.Builder()
+            // This makes the arc start at the 12 o'clock position
+            .setAnchorAngle(degrees(-90f))
             // Background arc
             .addContent(
                 ArcLine.Builder()
@@ -183,19 +188,10 @@ class StepCountTileService : SuspendingTileService() {
             .addContent(
                 ArcLine.Builder()
                     .setLength(degrees(progressDegrees.toFloat()))
-                    .setColor(TILE_CyanHZ)
+                    .setColor(if (goalAchieved) TILE_follicleGreen else TILE_CyanHZ)
                     .setThickness(dp(12f))
                     .build()
             )
-            // Add milestone markers at 25%, 50%, 75%
-          .addContent(
-             ArcLine.Builder()
-                   .setLength(degrees(2f))
-                  .setColor(TILE_WhiteText)
-                   .setThickness(dp(14f))
-                    //.setAngularAlignment(LayoutElementBuilders.ARC_ANCHOR_START)
-                    .build()
-           )
             .build()
     }
 
@@ -232,21 +228,8 @@ class StepCountTileService : SuspendingTileService() {
 
             .addContent(Spacer.Builder().setHeight(dp(2f)).build())
 
-            // Progress percentage
-            .addContent(
-                Text.Builder()
-                    .setText("$progressPercentage%")
-                    .setFontStyle(
-                        LayoutElementBuilders.FontStyle.Builder()
-                            .setColor(TILE_CyanHZ)
-                            .setSize(sp(12f))
-                            .setWeight(LayoutElementBuilders.FONT_WEIGHT_MEDIUM)
-                            .build()
-                    )
-                    .build()
-            )
 
-            .addContent(Spacer.Builder().setHeight(dp(4f)).build())
+            .addContent(Spacer.Builder().setHeight(dp(2f)).build())
 
             // Goal text with achievement status
             .addContent(
@@ -257,6 +240,21 @@ class StepCountTileService : SuspendingTileService() {
                             .setColor(if (goalAchieved) TILE_follicleGreen else TILE_GrayInactive)
                             .setSize(sp(10f))
                             .setWeight(if (goalAchieved) LayoutElementBuilders.FONT_WEIGHT_BOLD else LayoutElementBuilders.FONT_WEIGHT_NORMAL)
+                            .build()
+                    )
+                    .build()
+            )
+            .addContent(Spacer.Builder().setHeight(dp(2f)).build())
+
+            // Progress percentage
+            .addContent(
+                Text.Builder()
+                    .setText("$progressPercentage%")
+                    .setFontStyle(
+                        LayoutElementBuilders.FontStyle.Builder()
+                            .setColor(TILE_CyanHZ)
+                            .setSize(sp(12f))
+                            .setWeight(LayoutElementBuilders.FONT_WEIGHT_MEDIUM)
                             .build()
                     )
                     .build()

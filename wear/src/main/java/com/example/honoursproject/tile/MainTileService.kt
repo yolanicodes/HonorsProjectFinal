@@ -40,7 +40,8 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import java.time.format.DateTimeFormatter
 
-//private const val RESOURCES_VERSION = "0"
+
+
 
 data class MenstrualCycleInfo(val phase: CyclePhase, val dayOfCycle: Int)
 
@@ -167,18 +168,22 @@ private fun noWorkoutLayout(
                 .addContent(
                     LayoutElementBuilders.Text.Builder()
                         .setText("No workouts are found for the day")
+                        .setMaxLines(3) // Example: allow up to 3 lines
+                        .setMultilineAlignment(LayoutElementBuilders.TEXT_ALIGN_CENTER) // Or START/END
+                        .setOverflow(LayoutElementBuilders.TEXT_OVERFLOW_UNDEFINED)
                         .setFontStyle(
                             LayoutElementBuilders.FontStyle.Builder()
                                 .setSize(DimensionBuilders.sp(14f))
                                 .setColor(TILE_WhiteText)
                                 .build()
-                        ).build()
+                        ).
+                        build()
                 )
                 .build()
         ).build() // build() is called here, returning a Box, which is a LayoutElement.
 }
 
-// CORRECTED: The return type is now the final built object, not the builder.
+
 private fun workoutTileLayout(
     context: Context,
     deviceParameters: DeviceParametersBuilders.DeviceParameters,
@@ -187,8 +192,8 @@ private fun workoutTileLayout(
 ): LayoutElementBuilders.LayoutElement {
 
     val workoutIcons = mapOf(
-        "run" to "run_icon",
-        "walk" to "steps_icon",
+        "Running" to "run_icon",
+        "Walking" to "steps_icon",
     )
 
     val workoutIconsRow = LayoutElementBuilders.Row.Builder()
@@ -197,7 +202,11 @@ private fun workoutTileLayout(
     val timeFormatter = DateTimeFormatter.ofPattern("HH:mm")
 
     workouts.forEachIndexed { index, workout ->
-        val iconId = workoutIcons[workout.workoutType.lowercase()] ?: "run_icon"
+        val iconId = if (workout.workoutType.contains("walk", ignoreCase = true)) {
+            "steps_icon"
+        } else {
+            "run_icon"
+        }
 
         val clickable = ModifiersBuilders.Clickable.Builder()
             .setId("workout_click_${workout.workoutType}")
@@ -287,7 +296,7 @@ private fun workoutTileLayout(
         CyclePhase.UNKNOWN -> TILE_WhiteText
     }
 
-    // CORRECTED: The final .build() is now here, returning a Box (which is a LayoutElement)
+
     return LayoutElementBuilders.Box.Builder()
         .setModifiers(
             ModifiersBuilders.Modifiers.Builder()
@@ -314,6 +323,18 @@ private fun workoutTileLayout(
                                     .build()
                         ).build()
                     ).build()
+                )
+                .setHorizontalAlignment(LayoutElementBuilders.HORIZONTAL_ALIGN_CENTER)
+                // Add "Today's Workout" Title
+                .addContent(
+                    LayoutElementBuilders.Text.Builder()
+                        .setText("Today's Workout")
+                        .setFontStyle(
+                            LayoutElementBuilders.FontStyle.Builder()
+                                .setSize(DimensionBuilders.sp(14f))
+                                .setColor(TILE_WhiteText)
+                                .build()
+                        ).build()
                 )
                 .addContent(LayoutElementBuilders.Spacer.Builder().setHeight(DimensionBuilders.dp(16f)).build())
                 .addContent(workoutIconsRow.build())

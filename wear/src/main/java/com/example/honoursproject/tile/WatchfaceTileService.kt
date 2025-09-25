@@ -165,8 +165,9 @@ private fun tileLayout(
                 .setWidth(DimensionBuilders.expand())
                 .setHeight(DimensionBuilders.expand())
                 .setHorizontalAlignment(LayoutElementBuilders.HORIZONTAL_ALIGN_CENTER)
+                .addContent(Spacer.Builder().setHeight(DimensionBuilders.weight(0.5f)).build())
                 .addContent(dateHeader(context, now))
-                .addContent(Spacer.Builder().setHeight(DimensionBuilders.weight(1f)).build())
+                .addContent(Spacer.Builder().setHeight(DimensionBuilders.weight(0.5f)).build())
                 .addContent(
                     Row.Builder()
                         .setWidth(DimensionBuilders.wrap())
@@ -235,8 +236,8 @@ private fun dateHeader(context: Context, time: ZonedDateTime): LayoutElementBuil
         .addContent(
             LayoutElementBuilders.Image.Builder()
                 .setResourceId(WatchfaceTileService.ID_CALENDAR_ICON)
-                .setWidth(DimensionBuilders.dp(16f))
-                .setHeight(DimensionBuilders.dp(16f))
+                .setWidth(DimensionBuilders.dp(14f))
+                .setHeight(DimensionBuilders.dp(14f))
                 .build()
         )
         .addContent(Spacer.Builder().setWidth(DimensionBuilders.dp(6f)).build())

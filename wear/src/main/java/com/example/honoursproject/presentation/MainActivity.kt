@@ -12,11 +12,16 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboard
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
@@ -25,13 +30,16 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.wear.compose.material.*
 import com.example.honoursproject.dataservices.DataStreamService
+import com.example.honoursproject.R
 import com.example.honoursproject.dataservices.EvaluationState
-import com.example.honoursproject.dataservices.WorkoutSimulationManager
+import com.example.honoursproject.dataservices.SimulationManager
 import com.example.honoursproject.presentation.theme.HonoursProjectTheme
 import com.example.honoursproject.presentation.theme.backgroundBlue
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -53,7 +61,8 @@ class MainViewModel(private val activity: ComponentActivity) : ViewModel() {
     enum class SetupScreen {
         AgePicker,
         StepGoalPicker,
-        StartSimulation
+        StartSimulation,
+        SimulationRunning
     }
     val _isLoading = MutableStateFlow(true)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
@@ -66,6 +75,8 @@ class MainViewModel(private val activity: ComponentActivity) : ViewModel() {
 
     private val _selectedStepGoal = MutableStateFlow(10000)
     val selectedStepGoal: StateFlow<Int> = _selectedStepGoal.asStateFlow()
+    private val _isEvaluationMode = MutableStateFlow(false)
+    val isEvaluationMode: StateFlow<Boolean> = _isEvaluationMode.asStateFlow()
 
     init {
         viewModelScope.launch {
@@ -90,7 +101,15 @@ class MainViewModel(private val activity: ComponentActivity) : ViewModel() {
     fun proceedToStepGoal() {
         _currentScreen.value = SetupScreen.StepGoalPicker
     }
-
+    fun onToggleEvaluationMode(isEvaluation: Boolean) {
+        _isEvaluationMode.value = isEvaluation
+        if (isEvaluation) {
+            EvaluationState.startEvaluationMode()
+        } else {
+            // Assuming you add a function to reset the state
+            // EvaluationState.stopEvaluationMode()
+        }
+    }
     fun proceedToStartSimulation() {
         viewModelScope.launch {
             activity.setupDataStore.edit { prefs ->
@@ -101,12 +120,14 @@ class MainViewModel(private val activity: ComponentActivity) : ViewModel() {
         }
         _currentScreen.value = SetupScreen.StartSimulation
     }
-
+    fun onSimulationStarted() {
+        _currentScreen.value = SetupScreen.SimulationRunning
+    }
 }
 
 class MainActivity : ComponentActivity() {
     private val viewModel: MainViewModel by viewModels {
-        object : androidx.lifecycle.ViewModelProvider.Factory {
+        object : ViewModelProvider.Factory {
             override fun <T : ViewModel> create(modelClass: Class<T>): T {
                 return MainViewModel(this@MainActivity) as T
             }
@@ -143,11 +164,8 @@ class MainActivity : ComponentActivity() {
     private fun startForegroundService() {
         val serviceIntent = Intent(this, DataStreamService::class.java)
         ContextCompat.startForegroundService(this, serviceIntent)
-        viewModel._isLoading.value = false
-
-        //WorkoutSimulationManager.startMonitoring(this, "P102-Workout_Data.csv")
-
-        viewModel._isLoading.value = false
+        //viewModel._isLoading.value = false
+        viewModel.onSimulationStarted()
     }
     override fun onCreate(savedInstanceState: Bundle?) {
         installSplashScreen()
@@ -158,11 +176,13 @@ class MainActivity : ComponentActivity() {
             val currentScreen by viewModel.currentScreen.collectAsState()
             val selectedAge by viewModel.selectedAge.collectAsState()
             val selectedStepGoal by viewModel.selectedStepGoal.collectAsState()
+            val isEvaluationMode by viewModel.isEvaluationMode.collectAsState()
             val scope = rememberCoroutineScope()
             WearApp(
                 currentScreen = currentScreen,
                 selectedAge = selectedAge,
                 selectedStepGoal = selectedStepGoal,
+                isEvaluationMode = isEvaluationMode,
                 onAgeChange = { viewModel.onAgeSelected(it) },
                 onStepGoalChange = { viewModel.onStepGoalSelected(it) },
                 onAgeConfirmed = { viewModel.proceedToStepGoal() },
@@ -170,12 +190,10 @@ class MainActivity : ComponentActivity() {
                 onStartSimulation = { scope.launch {
                     startSimulationWithPermissionCheck()
                 } },
-                onStartEvaluation = { scope.launch {
-                    // Set the state first
-                    EvaluationState.startEvaluationMode()
-                    // Then start the service
-                    startSimulationWithPermissionCheck()
-                }}
+                onToggleEvaluation = { viewModel.onToggleEvaluationMode(it) },
+                onStopSimulation = {
+                    // Stop the foreground service and SimulationManager
+                }
             )
         }
     }
@@ -190,9 +208,12 @@ fun WearApp(
     onAgeConfirmed: () -> Unit,
     onStepGoalConfirmed: () -> Unit,
     onStartSimulation: () -> Unit,
-    onStartEvaluation: () -> Unit
+    onToggleEvaluation: (Boolean) -> Unit,
+    onStopSimulation: () -> Unit,
+    isEvaluationMode: Boolean
 ) {
     HonoursProjectTheme {
+        val context= LocalContext.current
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -212,10 +233,15 @@ fun WearApp(
                     onConfirm = onStepGoalConfirmed
                 )
                 MainViewModel.SetupScreen.StartSimulation -> StartSimulationScreen(
+                    isEvaluationMode = isEvaluationMode,
                     onStart = onStartSimulation,
-                    onStartEvaluation,
-                    isLoading = false // Pass a default or observed state here
+                    onToggleEvaluation = onToggleEvaluation
                 )
+
+                MainViewModel.SetupScreen.SimulationRunning -> SimulationRunningScreen(onStop = onStopSimulation,
+                    onPause = { SimulationManager.pauseSimulation(
+                        context = context
+                    ) })
             }
         }
     }
@@ -290,53 +316,114 @@ fun StepGoalPickerScreen(
 
 @Composable
 fun StartSimulationScreen(
+    isEvaluationMode: Boolean,
     onStart: () -> Unit,
-    onStartEvaluation: () -> Unit,
-    isLoading: Boolean
+    onToggleEvaluation: (Boolean) -> Unit
 ) {
     Column(
         modifier = Modifier.fillMaxSize().padding( 16.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
+//        Text("Ready To Start", style = MaterialTheme.typography.title2)
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // Replace the second button with a ToggleChip
+        ToggleChip(
+            checked = isEvaluationMode,
+            onCheckedChange = onToggleEvaluation,
+            label = { Text("Evaluation Mode") },
+            modifier = Modifier.fillMaxWidth(),
+            toggleControl = {
+                Switch(
+                    checked = isEvaluationMode,
+                    modifier = Modifier.semantics {
+                        this.contentDescription = if (isEvaluationMode) "Evaluation mode on" else "Evaluation mode off"
+                    }
+                )
+            },
+            secondaryLabel =  { Text("Activate Evaluation Mode") },
+            colors = ToggleChipDefaults.toggleChipColors(
+                checkedEndBackgroundColor = MaterialTheme.colors.primaryVariant,
+                uncheckedEndBackgroundColor = MaterialTheme.colors.primaryVariant,
+                uncheckedContentColor = MaterialTheme.colors.onPrimary,
+            )
+        )
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // Single "Start" button
+        Button(onClick = onStart) {
+            Text("Start")
+        }
+        
+    }
+}
+@Composable
+fun SimulationRunningScreen(
+    onPause: () -> Unit,
+    onStop: () -> Unit
+) {
+    var isLoading by remember { mutableStateOf(true) }
+    var isPaused by remember { mutableStateOf(false) }
+
+    // This effect will switch from the loading indicator to the success message
+    LaunchedEffect(key1 = Unit) {
+        delay(2500) // Wait 2.5 seconds to simulate setup
+        isLoading = false
+    }
+
+    Column(
+        modifier = Modifier.fillMaxSize().padding(16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
         if (isLoading) {
-            // Show a progress indicator while the simulation is preparing
-            CircularProgressIndicator()
+            CircularProgressIndicator(modifier = Modifier.size(48.dp))
             Spacer(modifier = Modifier.height(16.dp))
-            Text("Preparing simulation...", textAlign = TextAlign.Center)
+            Text("Starting Simulation...")
         } else {
-            Text("Setup Complete!")
-            Spacer(modifier = Modifier.height(16.dp))
-            Button(onClick = onStart) {
-                Text("Start")
-            }
-            Spacer(modifier = Modifier.height(12.dp))
-            Button(
-                onClick = onStartEvaluation,
-                colors = ButtonDefaults.buttonColors(backgroundColor = MaterialTheme.colors.secondary)
+            Text(
+                "Simulation Started!",
+                style = MaterialTheme.typography.title3,
+                textAlign = TextAlign.Center
+            )
+            Spacer(modifier = Modifier.height(24.dp))
+            Row(
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("Start Evaluation")
+                // Pause/Resume Button
+                Button(
+                    onClick = {
+                        isPaused = !isPaused
+                        onPause() // This should call a function to pause/resume the manager
+                    },
+                    modifier = Modifier.size(60.dp),
+                    shape = CircleShape
+                ) {
+                    Icon(
+                        painter = painterResource(id = if (isPaused) R.drawable.play_icon else R.drawable.pause_icon),
+                        contentDescription = if (isPaused) "Resume" else "Pause"
+                    )
+                }
+                Spacer(modifier = Modifier.width(16.dp))
+                // Stop Button
+                Button(
+                    onClick = onStop,
+                    modifier = Modifier.size(60.dp),
+                    shape = CircleShape,
+                    colors = ButtonDefaults.buttonColors(backgroundColor = MaterialTheme.colors.error)
+                ) {
+                    Icon(
+                        painter = painterResource(id = R.drawable.stop_icon),
+                        contentDescription = "Stop"
+                    )
+                }
             }
         }
     }
 }
 
-// --- Previews ---
 
-@Preview(device = "id:wearos_small_round", showSystemUi = true)
-@Composable
-fun AgePickerPreview() {
-    AgePickerScreen(selectedAge = 25, onAgeChange = {}, onConfirm = {})
-}
 
-@Preview(device = "id:wearos_small_round", showSystemUi = true)
-@Composable
-fun StepGoalPickerPreview() {
-    StepGoalPickerScreen(selectedStepGoal = 10000, onStepGoalChange = {}, onConfirm = {})
-}
-
-@Preview(device = "id:wearos_small_round", showSystemUi = true)
-@Composable
-fun StartSimulationPreview() {
-    StartSimulationScreen(onStart = {},onStartEvaluation = {}, isLoading = false)
-}
