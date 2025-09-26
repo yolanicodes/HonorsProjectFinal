@@ -6,6 +6,7 @@ import android.content.Intent
 import android.graphics.Color
 import android.util.Log
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.datastore.preferences.preferencesDataStore
@@ -44,9 +45,12 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
+import kotlin.concurrent.atomics.AtomicLong
+import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
 val Context.healthDataStore by preferencesDataStore(name = "health_data_store")
 const val RESOURCES_VERSION = "1"
@@ -55,7 +59,9 @@ class WatchfaceTileService : SuspendingTileService() {
 
     override val serviceScope = CoroutineScope(SupervisorJob() +Dispatchers.IO)
     private var dataCollectionJob: Job? = null
-
+    @OptIn(ExperimentalAtomicApi::class)
+    private val lastUpdateTime = AtomicLong(0)
+    private val minUpdateinterval = 1000L // 1 second
     companion object {
         const val ID_HEART_ICON = "heart_icon"
         const val ID_STEPS_ICON = "steps_icon"
@@ -113,11 +119,13 @@ class WatchfaceTileService : SuspendingTileService() {
         ).build()
 
 
+    @OptIn(ExperimentalAtomicApi::class)
     override suspend fun tileRequest(
         requestParams: RequestBuilders.TileRequest
     ): TileBuilders.Tile {
         Log.d(TAG, "onTileRequest called")
         val latestData = SimulationManager.healthDataStream.value
+
         return TileBuilders.Tile.Builder()
             .setResourcesVersion(RESOURCES_VERSION)
             .setTileTimeline(
@@ -237,7 +245,7 @@ private fun dateHeader(context: Context, time: ZonedDateTime): LayoutElementBuil
             LayoutElementBuilders.Image.Builder()
                 .setResourceId(WatchfaceTileService.ID_CALENDAR_ICON)
                 .setWidth(DimensionBuilders.dp(14f))
-                .setHeight(DimensionBuilders.dp(14f))
+                .setHeight(DimensionBuilders.dp(1f))
                 .build()
         )
         .addContent(Spacer.Builder().setWidth(DimensionBuilders.dp(6f)).build())

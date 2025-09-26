@@ -11,10 +11,7 @@ import com.example.honoursproject.presentation.SetupPreferences
 import com.example.honoursproject.presentation.setupDataStore
 import com.example.honoursproject.presentation.workoutsimulation.WorkoutActivity
 import kotlinx.coroutines.*
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.time.delay
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
@@ -38,7 +35,8 @@ data class WorkoutDetails(
 )
 
 data class WorkoutSchedule(
-    val upcomingWorkouts: List<WorkoutDetails> = emptyList()
+    val upcomingWorkouts: List<WorkoutDetails> = emptyList(),
+    val nextWorkout: WorkoutDetails? = null
 )
 
 // Heart rate zone calculation
@@ -51,17 +49,43 @@ data class WorkoutSummary(
     val cycleDay: Int?,
     val dayOfCycle: Int,
     val heartZones: Map<Int, Long>, // Zone -> Duration in seconds
-    val workoutHealthData: List<HealthDataRecord> = emptyList()
+    val workoutHealthData: List<HealthDataRecord> = emptyList(),
+    val avgHeartRateActual: Double = 0.0,
+    val maxHeartRateActual: Double = 0.0,
+    val totalActiveEnergyActual: Double = 0.0
 )
 
-// Workout timing states
+// Enhanced workout timing states with synchronization info
 sealed class WorkoutTimingState {
     object Idle : WorkoutTimingState()
-    data class NotificationScheduled(val workoutType: String, val timeRemaining: Long) : WorkoutTimingState()
-    data class UserStartedEarly(val workoutType: String, val actualStartCountdown: Long) : WorkoutTimingState()
-    data class AutoStartCountdown(val workoutType: String, val countdown: Int) : WorkoutTimingState()
-    data class InProgress(val workoutType: String, val startTime: LocalDateTime) : WorkoutTimingState()
-    data class Finished(val summary: WorkoutSummary) : WorkoutTimingState()
+    data class NotificationScheduled(
+        val workoutType: String,
+        val timeRemaining: Long,
+        val healthDataSynced: Boolean = true
+    ) : WorkoutTimingState()
+    data class UserStartedEarly(
+        val workoutType: String,
+        val actualStartCountdown: Long,
+        val healthDataSynced: Boolean = true
+    ) : WorkoutTimingState()
+    data class AutoStartCountdown(
+        val workoutType: String,
+        val countdown: Int,
+        val healthDataSynced: Boolean = true
+    ) : WorkoutTimingState()
+    data class InProgress(
+        val workoutType: String,
+        val startTime: LocalDateTime,
+        val healthDataSynced: Boolean = true
+    ) : WorkoutTimingState()
+    data class Finished(
+        val summary: WorkoutSummary,
+        val healthDataSynced: Boolean = true
+    ) : WorkoutTimingState()
+    data class SynchronizationNeeded(
+        val workoutType: String,
+        val reason: String
+    ) : WorkoutTimingState()
 }
 
 // Represents the state of the workout simulation
@@ -69,6 +93,7 @@ sealed class WorkoutState {
     object Idle : WorkoutState()
     data class InProgress(val workoutType: String) : WorkoutState()
     data class Finished(val summary: WorkoutSummary) : WorkoutState()
+    data class SyncRequired(val reason: String) : WorkoutState()
 }
 
 object WorkoutSimulationManager {
@@ -79,6 +104,7 @@ object WorkoutSimulationManager {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var monitoringJob: Job? = null
     private var countdownJob: Job? = null
+    private var synchronizationJob: Job? = null
 
     private val _workoutState = MutableStateFlow<WorkoutState>(WorkoutState.Idle)
     val workoutState = _workoutState.asStateFlow()
@@ -93,11 +119,18 @@ object WorkoutSimulationManager {
     private var evaluationStartTime: LocalDateTime? = null
     private var userStartedEarly = false
 
+    // Enhanced synchronization tracking
+    private var lastHealthDataSyncCheck: Long = 0L
+    private val syncCheckInterval = 30000L // Check every 30 seconds
+
     fun startMonitoring(context: Context, workoutCsvFileName: String) {
         if (monitoringJob?.isActive == true) return
-        Log.i("WorkoutSimManager", "Starting workout monitoring.")
+        Log.i("WorkoutSimManager", "Starting enhanced workout monitoring with health data coordination.")
 
         monitoringJob = scope.launch {
+            // Start synchronization monitoring
+            startSynchronizationMonitoring(context)
+
             if (EvaluationState.isEvaluationMode.value) {
                 processEvaluationMode(context, workoutCsvFileName)
             } else {
@@ -106,16 +139,114 @@ object WorkoutSimulationManager {
         }
     }
 
-    // Fix for WorkoutSimulationManager.kt - evaluation mode workout loading
+    /**
+     * Monitor health data simulation synchronization
+     */
+    private fun startSynchronizationMonitoring(context: Context) {
+        synchronizationJob = scope.launch {
+            while (scope.isActive) {
+                try {
+                    // Check if health data simulation is running and synchronized
+                    val healthSimulationRunning = SimulationManager.isRunning()
+                    val healthSimulationPaused = SimulationManager.isPaused()
+                    val currentTime = System.currentTimeMillis()
+
+                    if (!healthSimulationRunning) {
+                        Log.w("WorkoutSimManager", "Health data simulation not running - workout timing may be affected")
+                        updateTimingStateForSync("Health data simulation stopped")
+                    } else if (healthSimulationPaused) {
+                        Log.w("WorkoutSimManager", "Health data simulation paused - workout timing paused")
+                        updateTimingStateForSync("Health data simulation paused")
+                    } else {
+                        // Health simulation is running normally
+                        clearSynchronizationWarnings()
+                    }
+
+                    lastHealthDataSyncCheck = currentTime
+                    delay(syncCheckInterval)
+
+                } catch (e: Exception) {
+                    Log.e("WorkoutSimManager", "Error in synchronization monitoring", e)
+                    delay(syncCheckInterval)
+                }
+            }
+        }
+    }
+
+    private fun updateTimingStateForSync(reason: String) {
+        val currentState = _workoutTimingState.value
+        when (currentState) {
+            is WorkoutTimingState.NotificationScheduled -> {
+                _workoutTimingState.value = currentState.copy(healthDataSynced = false)
+            }
+            is WorkoutTimingState.UserStartedEarly -> {
+                _workoutTimingState.value = currentState.copy(healthDataSynced = false)
+            }
+            is WorkoutTimingState.AutoStartCountdown -> {
+                _workoutTimingState.value = currentState.copy(healthDataSynced = false)
+            }
+            is WorkoutTimingState.InProgress -> {
+                _workoutTimingState.value = currentState.copy(healthDataSynced = false)
+            }
+            is WorkoutTimingState.Finished -> {
+                _workoutTimingState.value = currentState.copy(healthDataSynced = false)
+            }
+            else -> {
+                _workoutTimingState.value = WorkoutTimingState.SynchronizationNeeded("Unknown", reason)
+            }
+        }
+    }
+
+    private fun clearSynchronizationWarnings() {
+        val currentState = _workoutTimingState.value
+        when (currentState) {
+            is WorkoutTimingState.NotificationScheduled -> {
+                if (!currentState.healthDataSynced) {
+                    _workoutTimingState.value = currentState.copy(healthDataSynced = true)
+                }
+            }
+            is WorkoutTimingState.UserStartedEarly -> {
+                if (!currentState.healthDataSynced) {
+                    _workoutTimingState.value = currentState.copy(healthDataSynced = true)
+                }
+            }
+            is WorkoutTimingState.AutoStartCountdown -> {
+                if (!currentState.healthDataSynced) {
+                    _workoutTimingState.value = currentState.copy(healthDataSynced = true)
+                }
+            }
+            is WorkoutTimingState.InProgress -> {
+                if (!currentState.healthDataSynced) {
+                    _workoutTimingState.value = currentState.copy(healthDataSynced = true)
+                }
+            }
+            is WorkoutTimingState.Finished -> {
+                if (!currentState.healthDataSynced) {
+                    _workoutTimingState.value = currentState.copy(healthDataSynced = true)
+                }
+            }
+            is WorkoutTimingState.SynchronizationNeeded -> {
+                _workoutTimingState.value = WorkoutTimingState.Idle
+            }
+            is WorkoutTimingState.Idle -> {}
+        }
+    }
+
     private suspend fun processEvaluationMode(context: Context, workoutCsvFileName: String) {
         evaluationStartTime = LocalDateTime.now()
         Log.i("WorkoutSimManager", "EVALUATION MODE: Started at $evaluationStartTime")
 
-        // FIX: Use 2023-08-19 for workout data to match simulation data
+        // Wait for health data simulation to be ready
+        waitForHealthDataSimulation()
+
+        // Use 2023-08-19 for workout data to match simulation data
         val evaluationWorkoutDate = LocalDate.of(2023, 8, 19)
         val evaluationWorkouts = findWorkoutsForDate(context, workoutCsvFileName, evaluationWorkoutDate)
 
-        _workoutSchedule.value = WorkoutSchedule(evaluationWorkouts)
+        _workoutSchedule.value = WorkoutSchedule(
+            upcomingWorkouts = evaluationWorkouts,
+            nextWorkout = evaluationWorkouts.firstOrNull()
+        )
 
         if (evaluationWorkouts.isEmpty()) {
             Log.w("WorkoutSimManager", "No workouts found for evaluation date: $evaluationWorkoutDate")
@@ -130,12 +261,41 @@ object WorkoutSimulationManager {
             processEvaluationWorkout(context, workout)
         }
     }
+
+    private suspend fun waitForHealthDataSimulation() {
+        Log.i("WorkoutSimManager", "Waiting for health data simulation to be ready...")
+        var attempts = 0
+        val maxAttempts = 30 // 30 seconds max wait
+
+        while (attempts < maxAttempts && !SimulationManager.isRunning()) {
+            delay(1000)
+            attempts++
+        }
+
+        if (SimulationManager.isRunning()) {
+            Log.i("WorkoutSimManager", "Health data simulation is ready after ${attempts} seconds")
+        } else {
+            Log.w("WorkoutSimManager", "Health data simulation not ready after ${attempts} seconds - proceeding anyway")
+        }
+    }
+
     private suspend fun processNormalMode(context: Context, workoutCsvFileName: String) {
         while (scope.isActive) {
-            val upcomingWorkouts = findUpcomingWorkoutsForToday(context, workoutCsvFileName)
-            _workoutSchedule.value = WorkoutSchedule(upcomingWorkouts)
+            // Check if health data simulation is still running
+            if (!SimulationManager.isRunning()) {
+                Log.w("WorkoutSimManager", "Health data simulation stopped - pausing workout monitoring")
+                _workoutState.value = WorkoutState.SyncRequired("Health data simulation stopped")
+                delay(Duration.ofMinutes(1)) // Check again in 1 minute
+                continue
+            }
 
+            val upcomingWorkouts = findUpcomingWorkoutsForToday(context, workoutCsvFileName)
             val nextWorkout = upcomingWorkouts.minByOrNull { it.startTime }
+
+            _workoutSchedule.value = WorkoutSchedule(
+                upcomingWorkouts = upcomingWorkouts,
+                nextWorkout = nextWorkout
+            )
 
             if (nextWorkout == null) {
                 Log.i("WorkoutSimManager", "No more workouts scheduled for today. Checking again in 5 minutes.")
@@ -155,7 +315,8 @@ object WorkoutSimulationManager {
                 val delayMillis = ChronoUnit.MILLIS.between(now, notificationTime)
                 _workoutTimingState.value = WorkoutTimingState.NotificationScheduled(
                     nextWorkout.workoutType,
-                    delayMillis
+                    delayMillis,
+                    SimulationManager.isRunning() && !SimulationManager.isPaused()
                 )
                 delay(delayMillis)
                 sendWorkoutNotification(context, nextWorkout)
@@ -168,6 +329,13 @@ object WorkoutSimulationManager {
                 // Check periodically if user started early
                 var currentTime = LocalDateTime.now()
                 while (currentTime.isBefore(autoStartTime) && !launchedWorkouts.contains(nextWorkout.startTime)) {
+                    // Also check if health simulation is still running
+                    if (!SimulationManager.isRunning()) {
+                        Log.w("WorkoutSimManager", "Health data simulation stopped during workout wait period")
+                        _workoutState.value = WorkoutState.SyncRequired("Health data simulation stopped")
+                        break
+                    }
+
                     delay(1000)
                     currentTime = LocalDateTime.now()
                 }
@@ -179,23 +347,28 @@ object WorkoutSimulationManager {
 
                     _workoutTimingState.value = WorkoutTimingState.UserStartedEarly(
                         nextWorkout.workoutType,
-                        timeToActualStart
+                        timeToActualStart,
+                        SimulationManager.isRunning() && !SimulationManager.isPaused()
                     )
 
                     if (timeToActualStart > 0) {
                         delay(timeToActualStart)
                     }
-                } else {
-                    // Start 30-second auto-start countdown
+                } else if (SimulationManager.isRunning()) {
+                    // Start 30-second auto-start countdown if health sim is still running
                     startAutoStartCountdown(context, nextWorkout)
                 }
             }
 
-            // Launch workout if not already started by user
-            if (!launchedWorkouts.contains(nextWorkout.startTime)) {
+            // Launch workout if not already started by user and health sim is running
+            if (!launchedWorkouts.contains(nextWorkout.startTime) && SimulationManager.isRunning()) {
                 launchWorkoutWithHealthData(context, nextWorkout)
                 _workoutState.value = WorkoutState.InProgress(nextWorkout.workoutType)
-                _workoutTimingState.value = WorkoutTimingState.InProgress(nextWorkout.workoutType, nextWorkout.startTime)
+                _workoutTimingState.value = WorkoutTimingState.InProgress(
+                    nextWorkout.workoutType,
+                    nextWorkout.startTime,
+                    SimulationManager.isRunning() && !SimulationManager.isPaused()
+                )
             }
 
             // Wait for workout to end
@@ -204,12 +377,15 @@ object WorkoutSimulationManager {
                 delay(endDelay)
             }
 
-            // Generate workout summary with real health data from the workout period
-            val summary = generateWorkoutSummary(context, nextWorkout)
+            // Generate comprehensive workout summary with synchronized health data
+            val summary = generateEnhancedWorkoutSummary(context, nextWorkout)
             _workoutState.value = WorkoutState.Finished(summary)
-            _workoutTimingState.value = WorkoutTimingState.Finished(summary)
+            _workoutTimingState.value = WorkoutTimingState.Finished(
+                summary,
+                SimulationManager.isRunning() && !SimulationManager.isPaused()
+            )
 
-            Log.i("WorkoutSimManager", "Workout finished. Summary generated.")
+            Log.i("WorkoutSimManager", "Workout finished. Enhanced summary generated.")
 
             launchedWorkouts.remove(nextWorkout.startTime)
             userStartedEarly = false
@@ -228,7 +404,8 @@ object WorkoutSimulationManager {
 
             _workoutTimingState.value = WorkoutTimingState.NotificationScheduled(
                 workout.workoutType,
-                ChronoUnit.MILLIS.between(LocalDateTime.now(), notificationTime)
+                ChronoUnit.MILLIS.between(LocalDateTime.now(), notificationTime),
+                SimulationManager.isRunning() && !SimulationManager.isPaused()
             )
 
             // Wait for notification time
@@ -255,7 +432,8 @@ object WorkoutSimulationManager {
 
                 _workoutTimingState.value = WorkoutTimingState.UserStartedEarly(
                     workout.workoutType,
-                    remainingTime
+                    remainingTime,
+                    SimulationManager.isRunning() && !SimulationManager.isPaused()
                 )
 
                 if (remainingTime > 0) {
@@ -273,7 +451,11 @@ object WorkoutSimulationManager {
 
                 launchWorkoutWithHealthData(context, evaluationWorkout)
                 _workoutState.value = WorkoutState.InProgress(workout.workoutType)
-                _workoutTimingState.value = WorkoutTimingState.InProgress(workout.workoutType, actualStartTime)
+                _workoutTimingState.value = WorkoutTimingState.InProgress(
+                    workout.workoutType,
+                    actualStartTime,
+                    SimulationManager.isRunning() && !SimulationManager.isPaused()
+                )
             }
 
             // Schedule workout end based on actual start time
@@ -286,13 +468,16 @@ object WorkoutSimulationManager {
             }
 
             // Generate comprehensive workout summary with health data from the workout period
-            val summary = generateWorkoutSummary(context, workout.copy(
+            val summary = generateEnhancedWorkoutSummary(context, workout.copy(
                 startTime = actualStartTime,
                 endTime = workoutEndTime
             ))
 
             _workoutState.value = WorkoutState.Finished(summary)
-            _workoutTimingState.value = WorkoutTimingState.Finished(summary)
+            _workoutTimingState.value = WorkoutTimingState.Finished(
+                summary,
+                SimulationManager.isRunning() && !SimulationManager.isPaused()
+            )
 
             Log.i("WorkoutSimManager", "Evaluation workout finished at ${LocalDateTime.now()}")
 
@@ -313,7 +498,8 @@ object WorkoutSimulationManager {
                 val remaining = 30 - second
                 _workoutTimingState.value = WorkoutTimingState.AutoStartCountdown(
                     workout.workoutType,
-                    remaining
+                    remaining,
+                    SimulationManager.isRunning() && !SimulationManager.isPaused()
                 )
                 delay(1000)
             }
@@ -322,12 +508,16 @@ object WorkoutSimulationManager {
         countdownJob?.join() // Wait for countdown to complete
     }
 
-    private suspend fun generateWorkoutSummary(context: Context, workout: WorkoutDetails): WorkoutSummary {
+    private suspend fun generateEnhancedWorkoutSummary(context: Context, workout: WorkoutDetails): WorkoutSummary {
         // Get health data during workout period from the simulation
         val workoutHealthData = getHealthDataDuringWorkout(context, workout)
 
         // Calculate heart rate zones based on actual health data during workout
         val heartZones = calculateHeartRateZones(context, workoutHealthData)
+
+        // Calculate actual workout metrics from health data
+        val (avgHeartRateActual, maxHeartRateActual, totalActiveEnergyActual) =
+            calculateActualWorkoutMetrics(workoutHealthData)
 
         // Get current health data for cycle information
         val currentHealthData = SimulationManager.healthDataStream.value
@@ -338,8 +528,23 @@ object WorkoutSimulationManager {
             cycleDay = currentHealthData.cycleDay,
             dayOfCycle = currentHealthData.cycleDay,
             heartZones = heartZones,
-            workoutHealthData = workoutHealthData
+            workoutHealthData = workoutHealthData,
+            avgHeartRateActual = avgHeartRateActual,
+            maxHeartRateActual = maxHeartRateActual,
+            totalActiveEnergyActual = totalActiveEnergyActual
         )
+    }
+
+    private fun calculateActualWorkoutMetrics(healthData: List<HealthDataRecord>): Triple<Double, Double, Double> {
+        if (healthData.isEmpty()) {
+            return Triple(0.0, 0.0, 0.0)
+        }
+
+        val avgHeartRate = healthData.map { it.heartRate }.average()
+        val maxHeartRate = healthData.maxOfOrNull { it.heartRate } ?: 0.0
+        val totalActiveEnergy = healthData.lastOrNull()?.activeEnergyBurned ?: 0.0
+
+        return Triple(avgHeartRate, maxHeartRate, totalActiveEnergy)
     }
 
     private suspend fun getHealthDataDuringWorkout(context: Context, workout: WorkoutDetails): List<HealthDataRecord> {
@@ -365,11 +570,11 @@ object WorkoutSimulationManager {
                     )
                 }
 
-                Log.i("WorkoutSimManager", "Retrieved ${healthRecords.size} health records for workout period")
+                Log.i("WorkoutSimManager", "Retrieved ${healthRecords.size} synchronized health records for workout period")
                 healthRecords
 
             } catch (e: Exception) {
-                Log.e("WorkoutSimManager", "Error getting workout health data", e)
+                Log.e("WorkoutSimManager", "Error getting synchronized workout health data", e)
                 emptyList()
             }
         }
@@ -431,7 +636,7 @@ object WorkoutSimulationManager {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         context.startActivity(intent)
-        Log.i("WorkoutSimManager", "Launching WorkoutActivity for workout at ${workout.startTime}")
+        Log.i("WorkoutSimManager", "Launching synchronized WorkoutActivity for workout at ${workout.startTime}")
     }
 
     // Public method for the Activity to call to prevent auto-launch
@@ -444,14 +649,30 @@ object WorkoutSimulationManager {
     fun stopMonitoring() {
         monitoringJob?.cancel()
         countdownJob?.cancel()
+        synchronizationJob?.cancel()
         monitoringJob = null
         countdownJob = null
+        synchronizationJob = null
         launchedWorkouts.clear()
         evaluationStartTime = null
         userStartedEarly = false
         _workoutState.value = WorkoutState.Idle
         _workoutTimingState.value = WorkoutTimingState.Idle
-        Log.i("WorkoutSimManager", "Workout monitoring stopped.")
+        Log.i("WorkoutSimManager", "Enhanced workout monitoring stopped.")
+    }
+
+    // Public method to check synchronization status
+    fun isHealthDataSynchronized(): Boolean {
+        return SimulationManager.isRunning() && !SimulationManager.isPaused()
+    }
+
+    // Public method to get synchronization status details
+    fun getSynchronizationStatus(): String {
+        return when {
+            !SimulationManager.isRunning() -> "Health data simulation stopped"
+            SimulationManager.isPaused() -> "Health data simulation paused"
+            else -> "Synchronized"
+        }
     }
 
     private suspend fun findWorkoutsForDate(context: Context, fileName: String, date: LocalDate): List<WorkoutDetails> {
@@ -517,10 +738,12 @@ object WorkoutSimulationManager {
         notificationManager.createNotificationChannel(channel)
 
         val timeFormatter = DateTimeFormatter.ofPattern("HH:mm")
+        val syncStatus = if (isHealthDataSynchronized()) "✓" else "⚠"
+
         val notificationText = if (EvaluationState.isEvaluationMode.value) {
-            "Evaluation workout: ${workout.workoutType} starting soon!"
+            "$syncStatus Evaluation workout: ${workout.workoutType} starting soon!"
         } else {
-            "${workout.workoutType} workout scheduled for ${workout.startTime.format(timeFormatter)}. Tap to start early."
+            "$syncStatus ${workout.workoutType} workout scheduled for ${workout.startTime.format(timeFormatter)}. Tap to start early."
         }
 
         val notification = NotificationCompat.Builder(context, NOTIFICATION_CHANNEL_ID)
@@ -532,6 +755,6 @@ object WorkoutSimulationManager {
             .build()
 
         notificationManager.notify(1, notification)
-        Log.i("WorkoutSimManager", "Notification sent: $notificationText")
+        Log.i("WorkoutSimManager", "Enhanced notification sent: $notificationText")
     }
 }

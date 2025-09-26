@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -16,7 +17,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.contentDescription
@@ -36,7 +36,9 @@ import androidx.wear.compose.material.*
 import com.example.honoursproject.dataservices.DataStreamService
 import com.example.honoursproject.R
 import com.example.honoursproject.dataservices.EvaluationState
+import com.example.honoursproject.dataservices.SimulationCoordinator
 import com.example.honoursproject.dataservices.SimulationManager
+import com.example.honoursproject.dataservices.WorkoutSimulationManager
 import com.example.honoursproject.presentation.theme.HonoursProjectTheme
 import com.example.honoursproject.presentation.theme.backgroundBlue
 import kotlinx.coroutines.delay
@@ -55,16 +57,19 @@ object SetupPreferences {
     val STEP_GOAL = intPreferencesKey("selected_step_goal")
 }
 
-// --- ViewModel ---
+// --- Enhanced ViewModel with SimulationCoordinator integration ---
 class MainViewModel(private val activity: ComponentActivity) : ViewModel() {
 
     enum class SetupScreen {
         AgePicker,
         StepGoalPicker,
+        SimulationRunning,
         StartSimulation,
-        SimulationRunning
+        SimulationPaused,
+        SimulationStopped
     }
-    val _isLoading = MutableStateFlow(true)
+
+    private val _isLoading = MutableStateFlow(true)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
 
     private val _currentScreen = MutableStateFlow(SetupScreen.AgePicker)
@@ -75,8 +80,29 @@ class MainViewModel(private val activity: ComponentActivity) : ViewModel() {
 
     private val _selectedStepGoal = MutableStateFlow(10000)
     val selectedStepGoal: StateFlow<Int> = _selectedStepGoal.asStateFlow()
+
     private val _isEvaluationMode = MutableStateFlow(false)
     val isEvaluationMode: StateFlow<Boolean> = _isEvaluationMode.asStateFlow()
+
+    private val _isSimulationRunning = MutableStateFlow(false)
+    val isSimulationRunning: StateFlow<Boolean> = _isSimulationRunning.asStateFlow()
+
+    private val _isPaused = MutableStateFlow(false)
+    val isPaused: StateFlow<Boolean> = _isPaused.asStateFlow()
+
+    private val _isSimulationComplete = MutableStateFlow(false)
+    val isSimulationComplete: StateFlow<Boolean> = _isSimulationComplete.asStateFlow()
+    private val _evaluationLoadingStatus = MutableStateFlow("")
+    val evaluationLoadingStatus: StateFlow<String> = _evaluationLoadingStatus.asStateFlow()
+
+    private val _isStartingUp = MutableStateFlow(false)
+    val isStartingUp: StateFlow<Boolean> = _isStartingUp.asStateFlow()
+    // Enhanced state tracking with SimulationCoordinator
+    private val _simulationProgress = MutableStateFlow(0f)
+    val simulationProgress: StateFlow<Float> = _simulationProgress.asStateFlow()
+
+    private val _synchronizationStatus = MutableStateFlow("Ready")
+    val synchronizationStatus: StateFlow<String> = _synchronizationStatus.asStateFlow()
 
     init {
         viewModelScope.launch {
@@ -86,6 +112,47 @@ class MainViewModel(private val activity: ComponentActivity) : ViewModel() {
                     _selectedStepGoal.value = prefs[SetupPreferences.STEP_GOAL] ?: 10000
                     _currentScreen.value = SetupScreen.StartSimulation
                 }
+            }
+            _isLoading.value = false
+
+            // Start monitoring simulation state changes
+            startSimulationStateMonitoring()
+        }
+    }
+
+    /**
+     * Monitor simulation state changes from SimulationCoordinator
+     */
+    private fun startSimulationStateMonitoring() {
+        viewModelScope.launch {
+            SimulationCoordinator.combinedSimulationState.collect { combinedState ->
+                // Update local state based on combined simulation state
+                _isSimulationRunning.value = combinedState.isHealthRunning
+                _isPaused.value = combinedState.isHealthPaused
+                _simulationProgress.value = combinedState.overallProgress
+
+                // Update synchronization status
+                _synchronizationStatus.value = if (combinedState.isSynchronized) {
+                    "Synchronized"
+                } else {
+                    SimulationCoordinator.getSynchronizationStatusMessage()
+                }
+
+                // Update screen based on simulation state
+                if (combinedState.isHealthRunning) {
+                    if (combinedState.isHealthPaused) {
+                        _currentScreen.value = SetupScreen.SimulationPaused
+                    } else {
+                        _currentScreen.value = SetupScreen.SimulationRunning
+                    }
+                } else if (_isSimulationRunning.value) {
+                    // Was running but now stopped
+                    _currentScreen.value = SetupScreen.SimulationStopped
+                }
+
+                Log.d("MainViewModel", "Simulation state updated: Running=${combinedState.isHealthRunning}, " +
+                        "Paused=${combinedState.isHealthPaused}, Progress=${combinedState.overallProgress}%, " +
+                        "Synchronized=${combinedState.isSynchronized}")
             }
         }
     }
@@ -101,15 +168,21 @@ class MainViewModel(private val activity: ComponentActivity) : ViewModel() {
     fun proceedToStepGoal() {
         _currentScreen.value = SetupScreen.StepGoalPicker
     }
+
+    /**
+     * Enhanced evaluation mode toggle with proper state management
+     */
     fun onToggleEvaluationMode(isEvaluation: Boolean) {
         _isEvaluationMode.value = isEvaluation
         if (isEvaluation) {
+            Log.i("MainViewModel", "Enabling evaluation mode")
             EvaluationState.startEvaluationMode()
         } else {
-            // Assuming you add a function to reset the state
-            // EvaluationState.stopEvaluationMode()
+            Log.i("MainViewModel", "Disabling evaluation mode")
+            EvaluationState.stopEvaluationMode()
         }
     }
+
     fun proceedToStartSimulation() {
         viewModelScope.launch {
             activity.setupDataStore.edit { prefs ->
@@ -120,8 +193,108 @@ class MainViewModel(private val activity: ComponentActivity) : ViewModel() {
         }
         _currentScreen.value = SetupScreen.StartSimulation
     }
-    fun onSimulationStarted() {
-        _currentScreen.value = SetupScreen.SimulationRunning
+
+    /**
+     * Enhanced simulation start with coordinated services
+     */
+    fun startSimulation() {
+        Log.i("MainViewModel", "Starting simulation - Evaluation mode: ${_isEvaluationMode.value}")
+
+        _isStartingUp.value = true
+
+        // Ensure evaluation state is properly set before starting
+        if (_isEvaluationMode.value) {
+            EvaluationState.startEvaluationMode()
+            _evaluationLoadingStatus.value = "Activating evaluation mode..."
+            Log.i("MainViewModel", "Evaluation mode activated for simulation")
+        } else {
+            EvaluationState.stopEvaluationMode()
+            _evaluationLoadingStatus.value = "Starting simulation..."
+            Log.i("MainViewModel", "Normal mode activated for simulation")
+        }
+
+        // Use SimulationCoordinator to start all services
+        SimulationCoordinator.startSimulation(activity)
+
+        // Monitor startup progress
+        viewModelScope.launch {
+            delay(2000) // Give services time to start
+
+            if (_isEvaluationMode.value) {
+                _evaluationLoadingStatus.value = "Loading historical data (Aug 2023)..."
+                delay(3000) // Extra time for historical data loading
+                _evaluationLoadingStatus.value = "Initializing evaluation timeline..."
+            } else {
+                _evaluationLoadingStatus.value = "Initializing simulation..."
+            }
+
+            delay(2000)
+            _evaluationLoadingStatus.value = "Ready"
+            _isStartingUp.value = false
+        }
+
+        // State will be updated automatically through the monitoring flow
+        Log.i("MainViewModel", "Simulation start command sent")
+    }
+
+
+
+    /**
+     * Enhanced pause/resume with SimulationCoordinator
+     */
+    fun togglePauseResume() {
+        if (SimulationCoordinator.canPause() && !_isPaused.value) {
+            Log.i("MainViewModel", "Pausing simulation")
+            SimulationCoordinator.pauseSimulation(activity)
+        } else if (SimulationCoordinator.canResume() && _isPaused.value) {
+            Log.i("MainViewModel", "Resuming simulation")
+            SimulationCoordinator.resumeSimulation(activity)
+        }
+    }
+
+    /**
+     * Enhanced stop with proper cleanup
+     */
+    fun stopSimulation() {
+        Log.i("MainViewModel", "Stopping simulation")
+        SimulationCoordinator.stopSimulation(activity)
+
+        // Reset evaluation mode when stopping
+        EvaluationState.stopEvaluationMode()
+        _isEvaluationMode.value = false
+    }
+
+    /**
+     * Reset simulation to initial state
+     */
+    fun resetSimulation() {
+        Log.i("MainViewModel", "Resetting simulation")
+        SimulationCoordinator.resetSimulation(activity)
+
+        // Reset evaluation mode
+        EvaluationState.stopEvaluationMode()
+        _isEvaluationMode.value = false
+    }
+
+    /**
+     * Restart from setup screen
+     */
+    fun restartFromSetup() {
+        _currentScreen.value = SetupScreen.StartSimulation
+        _isEvaluationMode.value = false
+        EvaluationState.stopEvaluationMode()
+    }
+
+    /**
+     * Get current simulation status message
+     */
+    fun getSimulationStatusMessage(): String {
+        return when {
+            _isPaused.value -> "Simulation Paused (${_simulationProgress.value.toInt()}%)"
+            _isSimulationRunning.value -> "Simulation Running (${_simulationProgress.value.toInt()}%)"
+            SimulationCoordinator.isStopped() -> "Simulation Stopped"
+            else -> "Ready to Start"
+        }
     }
 }
 
@@ -132,13 +305,16 @@ class MainActivity : ComponentActivity() {
                 return MainViewModel(this@MainActivity) as T
             }
         }
-
     }
+
     private val requestPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted: Boolean ->
             if (isGranted) {
-                // Permission granted, start the service
-                startForegroundService()
+                viewModel.startSimulation()
+            } else {
+                Log.w("MainActivity", "Notification permission denied")
+                // Still try to start the simulation even without notification permission
+                viewModel.startSimulation()
             }
         }
 
@@ -149,24 +325,18 @@ class MainActivity : ComponentActivity() {
                     Manifest.permission.POST_NOTIFICATIONS
                 ) == PackageManager.PERMISSION_GRANTED
             ) {
-                // Permission is already granted, start the service
-                startForegroundService()
+                // Permission is already granted, start the simulation
+                viewModel.startSimulation()
             } else {
                 // Permission not granted, request it from the user
                 requestPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
             }
         } else {
             // For older Android versions, no runtime permission is needed
-            startForegroundService()
+            viewModel.startSimulation()
         }
     }
 
-    private fun startForegroundService() {
-        val serviceIntent = Intent(this, DataStreamService::class.java)
-        ContextCompat.startForegroundService(this, serviceIntent)
-        //viewModel._isLoading.value = false
-        viewModel.onSimulationStarted()
-    }
     override fun onCreate(savedInstanceState: Bundle?) {
         installSplashScreen()
         super.onCreate(savedInstanceState)
@@ -177,43 +347,62 @@ class MainActivity : ComponentActivity() {
             val selectedAge by viewModel.selectedAge.collectAsState()
             val selectedStepGoal by viewModel.selectedStepGoal.collectAsState()
             val isEvaluationMode by viewModel.isEvaluationMode.collectAsState()
-            val scope = rememberCoroutineScope()
+            val isPaused by viewModel.isPaused.collectAsState()
+            val isRunning by viewModel.isSimulationRunning.collectAsState()
+            val simulationProgress by viewModel.simulationProgress.collectAsState()
+            val synchronizationStatus by viewModel.synchronizationStatus.collectAsState()
+            val evaluationLoadingStatus by viewModel.evaluationLoadingStatus.collectAsState()  // Add this
+            val isStartingUp by viewModel.isStartingUp.collectAsState()
             WearApp(
                 currentScreen = currentScreen,
                 selectedAge = selectedAge,
                 selectedStepGoal = selectedStepGoal,
                 isEvaluationMode = isEvaluationMode,
+                isPaused = isPaused,
+                isRunning = isRunning,
+                simulationProgress = simulationProgress,
+                synchronizationStatus = synchronizationStatus,
                 onAgeChange = { viewModel.onAgeSelected(it) },
                 onStepGoalChange = { viewModel.onStepGoalSelected(it) },
                 onAgeConfirmed = { viewModel.proceedToStepGoal() },
                 onStepGoalConfirmed = { viewModel.proceedToStartSimulation() },
-                onStartSimulation = { scope.launch {
-                    startSimulationWithPermissionCheck()
-                } },
+                onStartSimulation = { startSimulationWithPermissionCheck() },
                 onToggleEvaluation = { viewModel.onToggleEvaluationMode(it) },
-                onStopSimulation = {
-                    // Stop the foreground service and SimulationManager
-                }
+                onTogglePauseResume = { viewModel.togglePauseResume() },
+                onStopSimulation = { viewModel.stopSimulation() },
+                onRestartFromSetup = { viewModel.restartFromSetup() },
+                statusMessage = viewModel.getSimulationStatusMessage(),
+                evaluationLoadingStatus =evaluationLoadingStatus,
+                isStartingUp = isStartingUp
             )
         }
     }
 }
+
 @Composable
 fun WearApp(
     currentScreen: MainViewModel.SetupScreen,
     selectedAge: Int,
     selectedStepGoal: Int,
+    isEvaluationMode: Boolean,
+    isPaused: Boolean,
+    isRunning: Boolean,
+    simulationProgress: Float,
+    synchronizationStatus: String,
+    statusMessage: String,
     onAgeChange: (Int) -> Unit,
     onStepGoalChange: (Int) -> Unit,
     onAgeConfirmed: () -> Unit,
     onStepGoalConfirmed: () -> Unit,
     onStartSimulation: () -> Unit,
     onToggleEvaluation: (Boolean) -> Unit,
+    onTogglePauseResume: () -> Unit,
     onStopSimulation: () -> Unit,
-    isEvaluationMode: Boolean
+    onRestartFromSetup: () -> Unit,
+    evaluationLoadingStatus: String,  // Add this
+    isStartingUp: Boolean,
 ) {
     HonoursProjectTheme {
-        val context= LocalContext.current
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -237,11 +426,20 @@ fun WearApp(
                     onStart = onStartSimulation,
                     onToggleEvaluation = onToggleEvaluation
                 )
-
-                MainViewModel.SetupScreen.SimulationRunning -> SimulationRunningScreen(onStop = onStopSimulation,
-                    onPause = { SimulationManager.pauseSimulation(
-                        context = context
-                    ) })
+                MainViewModel.SetupScreen.SimulationRunning ->(isRunning)
+                MainViewModel.SetupScreen.SimulationPaused -> SimulationRunningScreen(
+                isPaused = isPaused,
+                progress = simulationProgress,
+                synchronizationStatus = synchronizationStatus,
+                statusMessage = statusMessage,
+                onTogglePauseResume = onTogglePauseResume,
+                onStop = onStopSimulation,
+                evaluationLoadingStatus = evaluationLoadingStatus,
+                isStartingUp = isStartingUp
+            )
+                MainViewModel.SetupScreen.SimulationStopped -> SimulationStoppedScreen(
+                    onRestart = onRestartFromSetup
+                )
             }
         }
     }
@@ -321,14 +519,13 @@ fun StartSimulationScreen(
     onToggleEvaluation: (Boolean) -> Unit
 ) {
     Column(
-        modifier = Modifier.fillMaxSize().padding( 16.dp),
+        modifier = Modifier.fillMaxSize().padding(16.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
-//        Text("Ready To Start", style = MaterialTheme.typography.title2)
         Spacer(modifier = Modifier.height(16.dp))
 
-        // Replace the second button with a ToggleChip
+        // Enhanced ToggleChip for evaluation mode
         ToggleChip(
             checked = isEvaluationMode,
             onCheckedChange = onToggleEvaluation,
@@ -342,34 +539,57 @@ fun StartSimulationScreen(
                     }
                 )
             },
-            secondaryLabel =  { Text("Activate Evaluation Mode") },
+            secondaryLabel = {
+                Text(if (isEvaluationMode) "Using historical data (Aug 2023)" else "Using current date simulation")
+            },
             colors = ToggleChipDefaults.toggleChipColors(
                 checkedEndBackgroundColor = MaterialTheme.colors.primaryVariant,
-                uncheckedEndBackgroundColor = MaterialTheme.colors.primaryVariant,
-                uncheckedContentColor = MaterialTheme.colors.onPrimary,
+                uncheckedEndBackgroundColor = MaterialTheme.colors.surface,
+                uncheckedContentColor = MaterialTheme.colors.onSurface,
             )
         )
 
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(24.dp))
 
-        // Single "Start" button
-        Button(onClick = onStart) {
-            Text("Start")
+        // Enhanced Start button with mode indicator
+        Button(
+            onClick = onStart,
+            modifier = Modifier.width(60.dp)
+        ) {
+            Text(if (isEvaluationMode) "Start" else "Start")
         }
-        
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // Mode description
+        Text(
+            text = if (isEvaluationMode) {
+                "Evaluation mode will simulate data from August 2023"
+            } else {
+                "Simulation will use current date and time"
+            },
+            style = MaterialTheme.typography.caption1,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.padding(horizontal = 8.dp)
+        )
     }
 }
+
 @Composable
 fun SimulationRunningScreen(
-    onPause: () -> Unit,
+    isPaused: Boolean,
+    progress: Float,
+    synchronizationStatus: String,
+    statusMessage: String,
+    evaluationLoadingStatus: String,
+    isStartingUp: Boolean,
+    onTogglePauseResume: () -> Unit,
     onStop: () -> Unit
 ) {
     var isLoading by remember { mutableStateOf(true) }
-    var isPaused by remember { mutableStateOf(false) }
 
-    // This effect will switch from the loading indicator to the success message
     LaunchedEffect(key1 = Unit) {
-        delay(2500) // Wait 2.5 seconds to simulate setup
+        delay(2500)
         isLoading = false
     }
 
@@ -378,27 +598,75 @@ fun SimulationRunningScreen(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
-        if (isLoading) {
+        if (isLoading || isStartingUp) {
             CircularProgressIndicator(modifier = Modifier.size(48.dp))
             Spacer(modifier = Modifier.height(16.dp))
-            Text("Starting Simulation...")
-        } else {
+
+            // Show specific loading status
             Text(
-                "Simulation Started!",
+                if (evaluationLoadingStatus.isNotBlank() && evaluationLoadingStatus != "Ready") {
+                    evaluationLoadingStatus
+                } else {
+                    "Starting Simulation..."
+                },
+                textAlign = TextAlign.Center,
+                style = MaterialTheme.typography.body1
+            )
+
+            if (evaluationLoadingStatus.contains("historical")) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    "This may take a moment...",
+                    style = MaterialTheme.typography.caption2,
+                    textAlign = TextAlign.Center
+                )
+            }
+        } else {
+            // Status text
+            Text(
+                statusMessage,
                 style = MaterialTheme.typography.title3,
                 textAlign = TextAlign.Center
             )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Progress indicator
+            if (progress > 0) {
+                CircularProgressIndicator(
+                    progress = progress / 100f,
+                    modifier = Modifier.size(40.dp)
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    "${progress.toInt()}% Complete",
+                    style = MaterialTheme.typography.caption1
+                )
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Synchronization status
+            Text(
+                synchronizationStatus,
+                style = MaterialTheme.typography.caption2,
+                color = if (synchronizationStatus == "Synchronized") {
+                    MaterialTheme.colors.primary
+                } else {
+                    MaterialTheme.colors.error
+                }
+            )
+
             Spacer(modifier = Modifier.height(24.dp))
+
+            // Control buttons (only show when not loading)
             Row(
                 horizontalArrangement = Arrangement.Center,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 // Pause/Resume Button
                 Button(
-                    onClick = {
-                        isPaused = !isPaused
-                        onPause() // This should call a function to pause/resume the manager
-                    },
+                    onClick = onTogglePauseResume,
                     modifier = Modifier.size(60.dp),
                     shape = CircleShape
                 ) {
@@ -424,6 +692,29 @@ fun SimulationRunningScreen(
         }
     }
 }
-
-
-
+@Composable
+fun SimulationStoppedScreen(
+    onRestart: () -> Unit
+) {
+    Column(
+        modifier = Modifier.fillMaxSize().padding(16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Text(
+            "Simulation Complete",
+            style = MaterialTheme.typography.title2,
+            textAlign = TextAlign.Center
+        )
+        Spacer(modifier = Modifier.height(16.dp))
+        Text(
+            "The simulation has been completed successfully. All health data has been processed.",
+            style = MaterialTheme.typography.body1,
+            textAlign = TextAlign.Center
+        )
+        Spacer(modifier = Modifier.height(24.dp))
+        Button(onClick = onRestart) {
+            Text("Start New Session")
+        }
+    }
+}

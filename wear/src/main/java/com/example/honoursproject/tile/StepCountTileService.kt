@@ -137,6 +137,9 @@ class StepCountTileService : SuspendingTileService() {
         goalAchieved: Boolean,
         menstrualInfo: MenstrualCycleInfo
     ): LayoutElementBuilders.LayoutElement {
+        val activityClassName = "${this.packageName}.presentation.StepAnalyticsActivity"
+        Log.d("StepCountTileService", "Setting up tile click to launch: $activityClassName")
+
         return Box.Builder()
             .setWidth(dp(184f))
             .setHeight(dp(184f))

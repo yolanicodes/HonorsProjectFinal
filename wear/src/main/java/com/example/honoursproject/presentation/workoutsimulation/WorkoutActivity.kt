@@ -81,7 +81,6 @@ class WorkoutActivity : ComponentActivity() {
                 userAge = userAge
             )
 
-            runOnUiThread {
                 viewModel = ViewModelProvider(this@WorkoutActivity, factory)[WorkoutViewModel::class.java]
 
                 setContent {
@@ -202,7 +201,7 @@ class WorkoutActivity : ComponentActivity() {
                         }
                     }
                 }
-            }
+
         }
     }
 }
@@ -759,16 +758,7 @@ fun WorkoutScreen(
         ) {
             // Header with evaluation mode indicator
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                if (isEvaluationMode) {
-                    Text(
-                        text = "EVAL",
-                        color = menstrualRed,
-                        fontSize = 8.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                  Row(verticalAlignment = Alignment.CenterVertically) {
                     val icon = if (workoutType.contains("walk", ignoreCase = true)) R.drawable.steps_icon else R.drawable.run_icon
                     Image(
                         painterResource(id = icon),
@@ -779,7 +769,7 @@ fun WorkoutScreen(
                     Spacer(Modifier.width(6.dp))
                     Text(
                         formatElapsedTime(elapsedTime),
-                        fontSize = 28.sp,
+                        fontSize = 26.sp,
                         fontWeight = FontWeight.Bold,
                         color = WhiteText
                     )
@@ -821,15 +811,6 @@ fun WorkoutScreen(
                         fontWeight = FontWeight.Bold
                     )
                 }
-            }
-
-            // Simulation progress indicator (small)
-            if (simulationProgress.totalRecords > 0) {
-                Text(
-                    text = "Sim: ${(simulationProgress.progressPercentage * 100).roundToInt()}%",
-                    color = Color.Gray,
-                    fontSize = 8.sp
-                )
             }
 
             Spacer(Modifier.height(8.dp))
