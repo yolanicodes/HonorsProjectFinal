@@ -64,7 +64,15 @@ object SimulationManager {
     private var isPaused: Boolean = false
     private var lastRecordTime: Long = 0L
 
+    private val healthInsertBuffer = mutableListOf<HealthRecordEntity>()
+    private val archiveInsertBuffer = mutableListOf<ArchiveRecordEntity>()
+    private var lastBatchInsert = 0L
+    private const val batchSize = 50
+    private const val batchTimeoutMs = 30000L
+
     // Simulation data state
+    private var lastUiUpdate = 0L
+    private val uiUpdateThrottle = 250L
     private var cumulativeSteps = 0
     private var cumulativeEnergy = 0.0
     private var currentSimulationDay: Int = -1
@@ -76,7 +84,28 @@ object SimulationManager {
     // Enhanced UI streaming queue for missed data
     private val pendingUIUpdates = mutableListOf<HealthDataRecord>()
     private var uiStreamingJob: Job? = null
+    private val _historicalLoadingProgress = MutableStateFlow(0f)
+    val historicalLoadingProgress = _historicalLoadingProgress.asStateFlow()
+    var shortTermDb : HealthDatabase?=null
+    var shortTermDao: HealthRecordDao? = null
+    var archiveDb: ArchiveDatabase? = null
+    var archiveDao: ArchiveRecordDao ?= null
+    private val _isHistoricalLoadingComplete = MutableStateFlow(false)
+    val isHistoricalLoadingComplete = _isHistoricalLoadingComplete.asStateFlow()
+    private val recordPool = mutableListOf<HealthDataRecord>()
+    private fun getPooledRecord(): HealthDataRecord {
+        return if (recordPool.isNotEmpty()) {
+            recordPool.removeLastOrNull() ?: HealthDataRecord()
+        } else {
+            HealthDataRecord()
+        }
+    }
 
+    private fun returnToPool(record: HealthDataRecord) {
+        if (recordPool.size < 10) { // Limit pool size
+            recordPool.add(record)
+        }
+    }
     suspend fun getUserAge(context: Context): Int {
         return context.setupDataStore.data
             .map { preferences ->
@@ -143,10 +172,40 @@ object SimulationManager {
 
                 // Always load historical data first in evaluation mode
                 if (EvaluationState.isEvaluationMode.value && historicalStartDate != null && historicalEndDate != null) {
-                    Log.i("SimulationManager", "Loading historical data for evaluation mode...")
-                    loadHistoricalData(context, allLines, historicalStartDate, historicalEndDate)
-                }
+                    Log.i(
+                        "SimulationManager",
+                        "Starting background historical data loading for evaluation mode..."
+                    )
 
+                    // Launch historical data loading in background
+                    scope.launch {
+                        try {
+                            Log.i("SimulationManager", "Background historical data loading started")
+                            loadHistoricalData(
+                                context,
+                                allLines,
+                                historicalStartDate,
+                                historicalEndDate
+                            )
+                            Log.i(
+                                "SimulationManager",
+                                "Background historical data loading completed"
+                            )
+                        } catch (e: Exception) {
+                            Log.e(
+                                "SimulationManager",
+                                "Error in background historical data loading",
+                                e
+                            )
+                        }
+                    }
+
+                    // Don't wait for historical data - continue with main simulation
+                    Log.i(
+                        "SimulationManager",
+                        "Main simulation continuing while historical data loads in background"
+                    )
+                }
                 // Start UI streaming job for continuous updates
                 startUIStreamingJob()
 
@@ -338,11 +397,10 @@ object SimulationManager {
         formatter: DateTimeFormatter,
         targetDate: LocalDate
     ) {
-        val shortTermDb = HealthDatabase.getInstance(context)
-        val shortTermDao = shortTermDb.healthRecordDao()
-        val archiveDb = ArchiveDatabase.getInstance(context)
-        val archiveDao = archiveDb.archiveRecordDao()
-
+        shortTermDb = HealthDatabase.getInstance(context)
+        shortTermDao = shortTermDb?.healthRecordDao()
+        archiveDb = ArchiveDatabase.getInstance(context)
+        archiveDao = archiveDb?.archiveRecordDao()
         var previousRecordTime: LocalDateTime? = null
 
         // Initialize simulation day
@@ -411,7 +469,10 @@ object SimulationManager {
                     cumulativeEnergy = newRecord.activeEnergyBurned
 
                     // Emit to stream for UI updates (immediate update)
-                    _healthDataStream.value = newRecord
+                    if (System.currentTimeMillis() - lastUiUpdate > uiUpdateThrottle) {
+                        _healthDataStream.value = newRecord
+                        lastUiUpdate = System.currentTimeMillis()
+                    }
                     lastKnownRecord = newRecord
                     previousRecordTime = currentRecordTime
 
@@ -425,52 +486,7 @@ object SimulationManager {
                         lastUpdateTime = timestamp
                     )
 
-                    // Store in databases
-                    scope.launch {
-                        try {
-                            shortTermDao.insert(
-                                HealthRecordEntity(
-                                    timestamp = timestamp,
-                                    heartRate = newRecord.heartRate,
-                                    stepCount = newRecord.stepCount,
-                                    activeEnergyBurned = newRecord.activeEnergyBurned,
-                                    cyclePhase = newRecord.cyclePhase,
-                                    cycleDay = newRecord.cycleDay,
-                                    basalEnergyBurned = newRecord.basalEnergyBurned,
-                                    vo2Max = newRecord.vo2Max,
-                                    restingHeartRate = newRecord.restingHeartRate,
-                                    basalBodyTemperature = newRecord.basalBodyTemperature
-                                )
-                            )
-
-                            // Clean old short-term data
-                            val cutoff = timestamp - TimeUnit.HOURS.toMillis(3)
-                            shortTermDao.deleteOlderThan(cutoff)
-                        } catch (e: Exception) {
-                            Log.e("SimulationManager", "Failed to insert short-term record", e)
-                        }
-                    }
-
-                    scope.launch {
-                        try {
-                            archiveDao.insert(
-                                ArchiveRecordEntity(
-                                    timestamp = timestamp,
-                                    heartRate = newRecord.heartRate,
-                                    stepCount = newRecord.stepCount,
-                                    activeEnergyBurned = newRecord.activeEnergyBurned,
-                                    basalEnergyBurned = newRecord.basalEnergyBurned,
-                                    cyclePhase = newRecord.cyclePhase,
-                                    cycleDay = newRecord.cycleDay,
-                                    vo2Max = newRecord.vo2Max,
-                                    restingHeartRate = newRecord.restingHeartRate,
-                                    basalBodyTemperature = newRecord.basalBodyTemperature
-                                )
-                            )
-                        } catch (e: Exception) {
-                            Log.e("SimulationManager", "Failed to insert archive record", e)
-                        }
-                    }
+               bufferRecordForInsertion(newRecord, timestamp)
 
                     // Persist state periodically
                     if (currentIndex % 10 == 0) {
@@ -503,7 +519,83 @@ object SimulationManager {
             }
         }
     }
+    private fun bufferRecordForInsertion(newRecord: HealthDataRecord, timestamp: Long) {
+        // Create both entity types from the same HealthDataRecord
+        val healthEntity = HealthRecordEntity(
+            timestamp = timestamp,
+            heartRate = newRecord.heartRate,
+            stepCount = newRecord.stepCount,
+            activeEnergyBurned = newRecord.activeEnergyBurned,
+            basalEnergyBurned = newRecord.basalEnergyBurned,
+            cyclePhase = newRecord.cyclePhase,
+            cycleDay = newRecord.cycleDay,
+            vo2Max = newRecord.vo2Max,
+            restingHeartRate = newRecord.restingHeartRate,
+            basalBodyTemperature = newRecord.basalBodyTemperature
+        )
 
+        val archiveEntity = ArchiveRecordEntity(
+            timestamp = timestamp,
+            heartRate = newRecord.heartRate,
+            stepCount = newRecord.stepCount,
+            activeEnergyBurned = newRecord.activeEnergyBurned,
+            basalEnergyBurned = newRecord.basalEnergyBurned,
+            cyclePhase = newRecord.cyclePhase,
+            cycleDay = newRecord.cycleDay,
+            vo2Max = newRecord.vo2Max,
+            restingHeartRate = newRecord.restingHeartRate,
+            basalBodyTemperature = newRecord.basalBodyTemperature
+        )
+
+        // Add to respective buffers
+        healthInsertBuffer.add(healthEntity)
+        archiveInsertBuffer.add(archiveEntity)
+
+        val timeSinceLastBatch = System.currentTimeMillis() - lastBatchInsert
+        val shouldFlushBySize = healthInsertBuffer.size >= batchSize
+        val shouldFlushByTime = timeSinceLastBatch > batchTimeoutMs
+        val shouldFlushByMemoryPressure = healthInsertBuffer.size > (batchSize * 2) // Emergency flush
+
+        if (shouldFlushBySize || shouldFlushByTime || shouldFlushByMemoryPressure) {
+            if (shouldFlushByMemoryPressure) {
+                Log.w("SimulationManager", "Emergency buffer flush due to memory pressure")
+            }
+            flushInsertBuffers()
+        }
+    }
+
+    private fun flushInsertBuffers() {
+        if (healthInsertBuffer.isEmpty() && archiveInsertBuffer.isEmpty()) return
+
+        scope.launch {
+            try {
+                // Batch insert to short-term database
+                if (healthInsertBuffer.isNotEmpty()) {
+                    shortTermDao?.insertBatch(healthInsertBuffer.toList())
+
+                    // Clean old records less frequently
+                    if (healthInsertBuffer.size >= batchSize) {
+                        val cutoff = System.currentTimeMillis() - TimeUnit.HOURS.toMillis(3)
+                        shortTermDao?.deleteOlderThan(cutoff)
+                    }
+                }
+
+                // Batch insert to archive database
+                if (archiveInsertBuffer.isNotEmpty()) {
+                    archiveDao?.insertBatch(archiveInsertBuffer.toList())
+                }
+
+                // Clear buffers and update timestamp
+                healthInsertBuffer.clear()
+                archiveInsertBuffer.clear()
+                lastBatchInsert = System.currentTimeMillis()
+
+            } catch (e: Exception) {
+                Log.e("SimulationManager", "Batch insert failed", e)
+                // Optionally retry or handle partial failure
+            }
+        }
+    }
     // Enhanced pause/resume methods with proper state management
     fun pauseSimulation(context: Context) {
         if (!isPaused && !isSimulationComplete) {
@@ -531,6 +623,7 @@ object SimulationManager {
     }
 
     fun stopStreaming() {
+        flushInsertBuffers()
         simulationJob?.cancel()
         synchronizationJob?.cancel()
         uiStreamingJob?.cancel()
@@ -670,6 +763,7 @@ object SimulationManager {
     // Key fixes needed in SimulationManager.kt for proper evaluation mode step analytics
 
     // 1. Fix in loadHistoricalData method - ensure proper timestamp conversion
+    // Replace the loadHistoricalData method in SimulationManager.kt
     private suspend fun loadHistoricalData(
         context: Context,
         allLines: List<String>,
@@ -677,7 +771,8 @@ object SimulationManager {
         endDate: LocalDate
     ) {
         Log.i("SimulationManager", "Loading historical data from $startDate to $endDate for step analytics")
-
+        _historicalLoadingProgress.value = 0f
+        _isHistoricalLoadingComplete.value = false
         try {
             val header = allLines.first()
             val dataLines = allLines.drop(1)
@@ -689,16 +784,14 @@ object SimulationManager {
             val archiveDb = ArchiveDatabase.getInstance(context)
             val archiveDao = archiveDb.archiveRecordDao()
 
-            // Process in smaller batches to avoid memory issues
-            val batchSize = 1000
-            var insertedCount = 0
-
             // CRITICAL FIX: Use the actual date range from evaluation state
             val evaluationStartDate = EvaluationState.HISTORICAL_START_DATE  // 2023-08-01
             val evaluationEndDate = EvaluationState.HISTORICAL_END_DATE      // 2023-08-18
 
-            // Pre-filter data for the correct date range
-            val relevantLines = dataLines.mapNotNull { line ->
+            Log.i("SimulationManager", "Pre-filtering data for date range: $evaluationStartDate to $evaluationEndDate")
+
+            // Pre-filter data for the correct date range - do this in memory first
+            val relevantRecords = dataLines.mapNotNull { line ->
                 try {
                     val values = line.split(',')
                     val recordTime = LocalDateTime.parse(values[startTimeIndex], formatter)
@@ -706,60 +799,60 @@ object SimulationManager {
 
                     // Check if the record falls within our evaluation historical range
                     if (!recordDate.isBefore(evaluationStartDate) && !recordDate.isAfter(evaluationEndDate)) {
-                        Log.d("SimulationManager", "Including historical record for date: $recordDate")
-                        Pair(recordTime, values)
+                        val record = parseRecord(values, columnIndexMap, HealthDataRecord())
+                        val historicalTimestamp = recordTime.atZone(ZoneId.systemDefault())
+                            .toInstant().toEpochMilli()
+
+                        ArchiveRecordEntity(
+                            timestamp = historicalTimestamp,
+                            heartRate = record.heartRate,
+                            stepCount = record.stepCount,
+                            activeEnergyBurned = record.activeEnergyBurned,
+                            basalEnergyBurned = record.basalEnergyBurned,
+                            cyclePhase = record.cyclePhase,
+                            cycleDay = record.cycleDay,
+                            vo2Max = record.vo2Max,
+                            restingHeartRate = record.restingHeartRate,
+                            basalBodyTemperature = record.basalBodyTemperature
+                        )
                     } else {
                         null
                     }
                 } catch (e: Exception) {
-                    Log.v("SimulationManager", "Skipping invalid record: ${e.message}")
-                    null
+                    null // Skip invalid records
                 }
             }
 
-            Log.i("SimulationManager", "Found ${relevantLines.size} relevant historical records to insert")
+            Log.i("SimulationManager", "Found ${relevantRecords.size} relevant historical records for batch insert")
 
-            // Insert in batches with proper timestamp conversion
-            relevantLines.chunked(batchSize).forEach { batch ->
-                batch.forEach { (originalTime, values) ->
+            if (relevantRecords.isNotEmpty()) {
+
+                val batchSize = 500
+                var insertedCount = 0
+                val totalRecords = relevantRecords.size
+                relevantRecords.chunked(batchSize).forEach { batch ->
                     try {
-                        val record = parseRecord(values, columnIndexMap, HealthDataRecord())
+                        archiveDao.insertBatch(batch)
+                        insertedCount += batch.size
 
-                        // CRITICAL: Use the original timestamp from the 2023 data
-                        val historicalTimestamp = originalTime.atZone(ZoneId.systemDefault())
-                            .toInstant().toEpochMilli()
+                        val progress = insertedCount.toFloat() / totalRecords.toFloat()
+                        _historicalLoadingProgress.value = progress
 
-                        archiveDao.insert(
-                            ArchiveRecordEntity(
-                                timestamp = historicalTimestamp,
-                                heartRate = record.heartRate,
-                                stepCount = record.stepCount,
-                                activeEnergyBurned = record.activeEnergyBurned,
-                                basalEnergyBurned = record.basalEnergyBurned,
-                                cyclePhase = record.cyclePhase,
-                                cycleDay = record.cycleDay,
-                                vo2Max = record.vo2Max,
-                                restingHeartRate = record.restingHeartRate,
-                                basalBodyTemperature = record.basalBodyTemperature
-                            )
-                        )
-                        insertedCount++
+                        Log.d("SimulationManager", "Batch inserted $insertedCount/${relevantRecords.size} records")
 
-                        // Log sample records for verification
-                        if (insertedCount <= 10) {
-                            Log.d("SimulationManager", "Inserted historical record #$insertedCount: " +
-                                    "Date=$originalTime, Steps=${record.stepCount}, " +
-                                    "Phase=${record.cyclePhase}, Day=${record.cycleDay}")
-                        }
+                        // Small delay to prevent overwhelming the system
+                        delay(10)
                     } catch (e: Exception) {
-                        Log.w("SimulationManager", "Error inserting historical record: ${e.message}")
+                        Log.e("SimulationManager", "Error inserting batch: ${e.message}")
                     }
                 }
-                // Small delay between batches to prevent overwhelming the system
-                delay(50)
+                _historicalLoadingProgress.value = 1f
+                _isHistoricalLoadingComplete.value = true
+                Log.i("SimulationManager", "Successfully batch-inserted $insertedCount historical records")
             }
-
-            Log.i("SimulationManager", "Successfully inserted $insertedCount historical records for step analytics")
+            else{
+                _isHistoricalLoadingComplete.value=true
+            }
 
         } catch (e: Exception) {
             Log.e("SimulationManager", "Error loading historical data for step analytics", e)
@@ -862,6 +955,7 @@ object SimulationManager {
         columnIndexMap: Map<String, Int>,
         lastRecord: HealthDataRecord
     ): HealthDataRecord {
+
         return try {
             val hrIndex = columnIndexMap["HeartRate"]
             val stepsIndex = columnIndexMap["StepCount"]

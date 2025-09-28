@@ -20,6 +20,8 @@ data class HealthRecordEntity(
 @Dao
 interface HealthRecordDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertBatch(records: List<HealthRecordEntity>)
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(record: HealthRecordEntity)
 
     @Query("SELECT * FROM health_records WHERE timestamp >= :since ORDER BY timestamp ASC")

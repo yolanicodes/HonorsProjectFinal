@@ -12,6 +12,7 @@ import androidx.core.app.NotificationCompat
 import com.example.honoursproject.R
 import com.example.honoursproject.tile.WatchfaceTileService
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.collectLatest
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -33,6 +34,8 @@ class DataStreamService : Service() {
         const val ACTION_STOP = "com.example.honoursproject.STOP_SIMULATION"
         const val ACTION_RESET = "com.example.honoursproject.RESET_SIMULATION"
     }
+    private val taskQueue = Channel<suspend () -> Unit>(capacity = Channel.UNLIMITED)
+    private var workerJob: Job? = null
 
     private val isServiceRunning = AtomicBoolean(false)
     private val supervisorJob = SupervisorJob()
@@ -44,6 +47,21 @@ class DataStreamService : Service() {
     private var isSimulationPaused = false
     private var lastNotificationUpdate = 0L
 
+    private fun startTaskWorker() {
+        workerJob = serviceScope.launch {
+            for (task in taskQueue) {
+                try {
+                    task()
+                } catch (e: Exception) {
+                    Log.e("DataStreamService", "Task execution failed", e)
+                }
+            }
+        }
+    }
+
+    private fun enqueueTask(task: suspend () -> Unit) {
+        taskQueue.trySend(task)
+    }
     override fun onCreate() {
         super.onCreate()
         Log.i("DataStreamService", "Service created")
@@ -118,6 +136,10 @@ class DataStreamService : Service() {
         // Cancel all jobs
         startupJob?.cancel()
         monitoringJob?.cancel()
+        workerJob?.cancel() // ADD THIS
+
+        // Close task queue
+        taskQueue.close() // ADD THIS
 
         // Stop all simulation services
         stopAllServices()
@@ -173,11 +195,13 @@ class DataStreamService : Service() {
      * Start simulation services in proper sequence with error handling
      */
     private suspend fun startServicesSequentially() {
+        startTaskWorker()
+
         try {
             Log.i("DataStreamService", "Starting simulation services")
 
             // Start health data simulation first
-            withContext(Dispatchers.IO) {
+            enqueueTask {
                 try {
                     SimulationManager.startStreaming(this@DataStreamService, "P102-Health_Data_Processed.csv")
                     Log.i("DataStreamService", "Health data simulation started successfully")
@@ -197,16 +221,15 @@ class DataStreamService : Service() {
             }
 
             // Start workout monitoring
-            withContext(Dispatchers.IO) {
+            enqueueTask {
                 try {
                     WorkoutSimulationManager.startMonitoring(this@DataStreamService, "P102-Workout_Data.csv")
                     Log.i("DataStreamService", "Workout monitoring started successfully")
                 } catch (e: Exception) {
                     Log.e("DataStreamService", "Failed to start workout monitoring", e)
-                    // Don't fail completely if workout monitoring fails
-                    Log.w("DataStreamService", "Continuing with health simulation only")
                 }
             }
+
 
             // Request tile update
             try {

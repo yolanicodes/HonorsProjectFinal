@@ -22,6 +22,8 @@ data class ArchiveRecordEntity(
 @Dao
 interface ArchiveRecordDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertBatch(records: List<ArchiveRecordEntity>)
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(record: ArchiveRecordEntity)
 
     @Query("SELECT * FROM archive_records ORDER BY timestamp ASC")

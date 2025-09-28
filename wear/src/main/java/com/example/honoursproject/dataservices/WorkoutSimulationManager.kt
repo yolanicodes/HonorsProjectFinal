@@ -97,6 +97,7 @@ sealed class WorkoutState {
 }
 
 object WorkoutSimulationManager {
+    private val heartRateZoneCache = ConcurrentHashMap<Int, HeartRateZone>()
     private const val NOTIFICATION_CHANNEL_ID = "workout_channel"
     private const val EVALUATION_NOTIFICATION_DELAY_MINUTES = 5L
     private const val EVALUATION_AUTO_START_COUNTDOWN_SECONDS = 30L
@@ -640,12 +641,151 @@ object WorkoutSimulationManager {
     }
 
     // Public method for the Activity to call to prevent auto-launch
-    fun userInitiatedWorkout(startTime: LocalDateTime) {
-        Log.i("WorkoutSimManager", "User initiated workout for $startTime. Preventing auto-launch.")
-        launchedWorkouts.add(startTime)
-        userStartedEarly = true
+    fun userInitiatedWorkout(userStartTime: LocalDateTime) {
+        Log.i("WorkoutSimManager", "User initiated workout at $userStartTime")
+
+        // Get the current scheduled workout
+        val scheduledWorkout = _workoutSchedule.value.nextWorkout
+
+        if (scheduledWorkout == null) {
+            Log.w("WorkoutSimManager", "No scheduled workout found for user initiation")
+            return
+        }
+
+        val scheduledStartTime = scheduledWorkout.startTime
+        val timeDifferenceMinutes = ChronoUnit.MINUTES.between(userStartTime, scheduledStartTime)
+
+        // Define early start threshold (e.g., more than 1 minute before scheduled time)
+        val earlyStartThresholdMinutes = 1L
+
+        when {
+            timeDifferenceMinutes > earlyStartThresholdMinutes -> {
+                // User started significantly early
+                handleEarlyStart(userStartTime, scheduledStartTime, scheduledWorkout)
+            }
+            timeDifferenceMinutes >= -5 -> {
+                // User started on-time or slightly early (within 5 minutes after scheduled time)
+                handleOnTimeStart(userStartTime, scheduledWorkout)
+            }
+            else -> {
+                // User started very late (more than 5 minutes after scheduled time)
+                handleLateStart(userStartTime, scheduledWorkout)
+            }
+        }
     }
 
+    private fun handleEarlyStart(
+        userStartTime: LocalDateTime,
+        scheduledStartTime: LocalDateTime,
+        workout: WorkoutDetails
+    ) {
+        Log.i("WorkoutSimManager", "Handling EARLY START - User started ${ChronoUnit.MINUTES.between(userStartTime, scheduledStartTime)} minutes early")
+
+        // Mark this workout as launched to prevent auto-launch
+        launchedWorkouts.add(scheduledStartTime)
+        userStartedEarly = true
+
+        // Calculate time remaining until actual workout start
+        val timeToActualStart = ChronoUnit.MILLIS.between(LocalDateTime.now(), scheduledStartTime)
+
+        // Update timing state to show early start countdown
+        _workoutTimingState.value = WorkoutTimingState.UserStartedEarly(
+            workoutType = workout.workoutType,
+            actualStartCountdown = timeToActualStart.coerceAtLeast(0L),
+            healthDataSynced = isHealthDataSynchronized()
+        )
+
+        // Start monitoring the countdown to actual start time
+        scope.launch {
+            // Update countdown every second until actual start time
+            while (LocalDateTime.now().isBefore(scheduledStartTime)) {
+                val remainingTime = ChronoUnit.MILLIS.between(LocalDateTime.now(), scheduledStartTime)
+
+                if (remainingTime <= 0) break
+
+                _workoutTimingState.value = WorkoutTimingState.UserStartedEarly(
+                    workoutType = workout.workoutType,
+                    actualStartCountdown = remainingTime,
+                    healthDataSynced = isHealthDataSynchronized()
+                )
+
+                delay(1000) // Update every second
+            }
+
+            // Transition to in progress when actual start time is reached
+            _workoutTimingState.value = WorkoutTimingState.InProgress(
+                workoutType = workout.workoutType,
+                startTime = scheduledStartTime,
+                healthDataSynced = isHealthDataSynchronized()
+            )
+        }
+    }
+
+    private fun handleOnTimeStart(userStartTime: LocalDateTime, workout: WorkoutDetails) {
+        Log.i("WorkoutSimManager", "Handling ON-TIME START - User started workout as scheduled")
+
+        // Mark this workout as launched to prevent auto-launch
+        launchedWorkouts.add(workout.startTime)
+        userStartedEarly = false
+
+        // Immediately transition to in progress
+        _workoutTimingState.value = WorkoutTimingState.InProgress(
+            workoutType = workout.workoutType,
+            startTime = userStartTime,
+            healthDataSynced = isHealthDataSynchronized()
+        )
+
+        _workoutState.value = WorkoutState.InProgress(workout.workoutType)
+
+        Log.i("WorkoutSimManager", "Workout started on-time, preventing auto-launch")
+    }
+
+    private fun handleLateStart(userStartTime: LocalDateTime, workout: WorkoutDetails) {
+        val minutesLate = ChronoUnit.MINUTES.between(workout.startTime, userStartTime)
+        Log.i("WorkoutSimManager", "Handling LATE START - User started $minutesLate minutes after scheduled time")
+
+        // Mark this workout as launched
+        launchedWorkouts.add(workout.startTime)
+        userStartedEarly = false
+
+        // Create adjusted workout with new start time but maintain original duration
+        val adjustedWorkout = workout.copy(
+            startTime = userStartTime,
+            endTime = userStartTime.plusMinutes(workout.duration.toLong())
+        )
+
+        // Immediately transition to in progress with adjusted times
+        _workoutTimingState.value = WorkoutTimingState.InProgress(
+            workoutType = workout.workoutType,
+            startTime = userStartTime,
+            healthDataSynced = isHealthDataSynchronized()
+        )
+
+        _workoutState.value = WorkoutState.InProgress(workout.workoutType)
+
+        Log.i("WorkoutSimManager", "Late workout started, adjusted end time to ${adjustedWorkout.endTime}")
+    }
+
+
+    fun userStartedEarly(userStartTime: LocalDateTime, scheduledStartTime: LocalDateTime) {
+        Log.i("WorkoutSimManager", "Explicit userStartedEarly called")
+
+        val scheduledWorkout = _workoutSchedule.value.nextWorkout
+        if (scheduledWorkout != null) {
+            handleEarlyStart(userStartTime, scheduledStartTime, scheduledWorkout)
+        } else {
+            // Fallback to basic early start handling
+            launchedWorkouts.add(scheduledStartTime)
+            userStartedEarly = true
+
+            val timeToActualStart = ChronoUnit.MILLIS.between(LocalDateTime.now(), scheduledStartTime)
+            _workoutTimingState.value = WorkoutTimingState.UserStartedEarly(
+                workoutType = "workout",
+                actualStartCountdown = timeToActualStart.coerceAtLeast(0L),
+                healthDataSynced = isHealthDataSynchronized()
+            )
+        }
+    }
     fun stopMonitoring() {
         monitoringJob?.cancel()
         countdownJob?.cancel()

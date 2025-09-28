@@ -1,5 +1,6 @@
 package com.example.honoursproject.presentation
 
+import android.graphics.Paint
 import android.content.Context
 import android.os.Bundle
 import androidx.compose.ui.graphics.Color
@@ -11,6 +12,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.*
+import androidx.compose.foundation.gestures.snapping.SnapPosition
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.runtime.*
@@ -19,7 +21,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.*
 import androidx.compose.ui.graphics.drawscope.DrawScope
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -42,6 +43,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import java.time.*
 import java.time.format.DateTimeFormatter
+import java.time.temporal.ChronoUnit
 import kotlin.math.*
 
 // Data classes
@@ -83,7 +85,7 @@ class MetricDetailViewModel(
         ZoomLevel("2H", 2, "HH:mm"),
         ZoomLevel("6H", 6, "HH:mm"),
         ZoomLevel("12H", 12, "HH:mm"),
-        ZoomLevel("1D", 24, "HH:mm"),
+        ZoomLevel("24H", 24, "HH:mm"),
         ZoomLevel("7D", 168, "dd MMM")
     )
 
@@ -584,15 +586,6 @@ fun MetricDetailScreen(
             }
             is MetricUiState.Success -> {
                 // Mode indicator for evaluation mode
-                if (isEvaluationMode) {
-                    Text(
-                        text = "EVALUATION MODE",
-                        color = ovulationPink,
-                        fontSize = 9.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-
                 // Interactive graph
                 InteractiveLineGraph(
                     data = state.graphData,
@@ -621,7 +614,7 @@ fun MetricDetailScreen(
                         else -> "Past ${state.zoomLevel.hours} Hours"
                     },
                     color = WhiteText,
-                    fontSize = 10.sp,
+                    fontSize = 8.sp,
                     fontWeight = FontWeight.Normal
                 )
 
@@ -640,14 +633,14 @@ fun MetricDetailScreen(
                     Image(
                         painter = painterResource(id = R.drawable.cycle_icon),
                         contentDescription = "Cycle Icon",
-                        modifier = Modifier.size(16.dp),
+                        modifier = Modifier.size(12.dp),
                         colorFilter = ColorFilter.tint(cycleColor)
                     )
                     Spacer(modifier = Modifier.width(4.dp))
                     Text(
-                        text = "Day ${state.cycleDay}",
+                        text = "${state.cycleDay}",
                         color = cycleColor,
-                        fontSize = 11.sp
+                        fontSize = 8.sp
                     )
                 }
             }
@@ -683,12 +676,13 @@ fun InteractiveLineGraph(
     }
 
     var isDragging by remember { mutableStateOf(false) }
-    var dragStartX by remember { mutableStateOf(0f) }
+    var dragStartX by remember { mutableFloatStateOf(0f) }
 
-    Box(modifier = modifier) {
+    Box(modifier = modifier, contentAlignment = Alignment.Center) {
         Canvas(
             modifier = Modifier
-                .fillMaxSize()
+                .fillMaxSize(0.9f)
+                .padding(bottom = 5.dp)
                 .pointerInput(Unit) {
                     detectDragGestures(
                         onDragStart = { offset ->
@@ -729,9 +723,8 @@ fun InteractiveLineGraph(
                 }
         ) {
             val canvasWidth = size.width
-            val canvasHeight = size.height
+            val canvasHeight = size.height - 16.dp.toPx() // Reserve space for X-axis labels
             val yRange = (maxValue - minValue).takeIf { it > 0 } ?: 1f
-
             // Enhanced grid with time markers
             drawTimeGrid(canvasWidth, canvasHeight, gridColor, data, timeRange, zoomLevel)
 
@@ -772,9 +765,17 @@ fun InteractiveLineGraph(
                 // Enhanced latest point indicator
                 val latestPoint = getPoint(data.last(), data.size - 1)
                 drawLatestPointIndicator(latestPoint, lineColor)
+                drawXAxisLabels(
+                    canvasWidth = canvasWidth,
+                    canvasHeight = size.height, // Use full canvas height for positioning
+                    data = data,
+                    timeRange = timeRange,
+                    zoomLevel = zoomLevel,
+                    cycleData = cycleData
+                )
             }
         }
-
+        Spacer(Modifier.height(5.dp))
         // Enhanced time labels with cycle information
         EnhancedTimeLabels(
             timeRange = timeRange,
@@ -820,12 +821,12 @@ private fun DrawScope.drawTimeGrid(
         )
     }
 
-    // Vertical time markers (every few hours or days depending on zoom)
+    // Enhanced vertical time markers with proper intervals
     val markerCount = when {
-        zoomLevel.hours <= 2 -> 4 // Every 30 minutes
-        zoomLevel.hours <= 12 -> 6 // Every 2 hours
-        zoomLevel.hours <= 24 -> 8 // Every 3 hours
-        else -> 7 // Every day for weekly
+        zoomLevel.hours <= 2 -> 4 // Every 30 minutes for 2H view
+        zoomLevel.hours <= 6 -> 6 // Every hour for 6H view
+        zoomLevel.hours <= 24 -> 6 // Every 4 hours for 24H view
+        else -> data.size.coerceAtMost(7) // Daily markers for weekly view
     }
 
     (0..markerCount).forEach { i ->
@@ -838,8 +839,107 @@ private fun DrawScope.drawTimeGrid(
         )
     }
 }
+private fun DrawScope.drawXAxisLabels(
+    canvasWidth: Float,
+    canvasHeight: Float,
+    data: List<DataPoint>,
+    timeRange: TimeRange,
+    zoomLevel: ZoomLevel,
+    cycleData: Map<Long, CyclePhase>
+) {
+    val paint = Paint().apply {
+        color = WhiteText.toArgb()
+        textSize = 8.sp.toPx()
+        alpha = 200
+    }
 
-private fun DrawScope.drawYAxisLabels(
+    when {
+        // Weekly view - show cycle days
+        zoomLevel.hours >= 168 -> {
+            val markerCount = data.size.coerceAtMost(7)
+            (0 until markerCount).forEach { i ->
+                val x = canvasWidth * (i + 0.5f) / markerCount.coerceAtLeast(1)
+                val dataIndex = (i * data.size / markerCount.coerceAtLeast(1)).coerceIn(0, data.size - 1)
+
+                if (dataIndex < data.size) {
+                    val dataPoint = data[dataIndex]
+                    val date = Instant.ofEpochMilli(dataPoint.time)
+                        .atZone(ZoneId.systemDefault())
+                        .toLocalDate()
+                        .atStartOfDay(ZoneId.systemDefault())
+                        .toInstant()
+                        .toEpochMilli()
+
+                    // Find cycle day from cycleData or estimate
+                    val cycleDay = cycleData.entries.minByOrNull {
+                        abs(it.key - date)
+                    }?.let { entry ->
+                        // Calculate cycle day based on date difference
+                        val daysDiff = ChronoUnit.DAYS.between(
+                            Instant.ofEpochMilli(entry.key).atZone(ZoneId.systemDefault()).toLocalDate(),
+                            Instant.ofEpochMilli(date).atZone(ZoneId.systemDefault()).toLocalDate()
+                        )
+                        ((daysDiff) % 28 + 1).toInt()
+                    } ?: (i + 1) // Fallback to sequential numbering
+
+                    drawContext.canvas.nativeCanvas.drawText(
+                        "D$cycleDay",
+                        x,
+                        canvasHeight - 5.dp.toPx(),
+                        paint
+                    )
+                }
+            }
+        }
+        // 24H view - show every 4 hours
+        zoomLevel.hours >= 24 -> {
+            val markerCount = 6
+            (0..markerCount).forEach { i ->
+                val x = canvasWidth * i / markerCount
+                val hoursOffset = (i * 4) // Every 4 hours
+                val time = timeRange.start.plusHours(hoursOffset.toLong())
+
+                drawContext.canvas.nativeCanvas.drawText(
+                    time.format(DateTimeFormatter.ofPattern("HH:mm")),
+                    x,
+                    canvasHeight - 5.dp.toPx(),
+                    paint
+                )
+            }
+        }
+        // 6H view - show every hour
+        zoomLevel.hours >= 6 -> {
+            val markerCount = 6
+            (0..markerCount).forEach { i ->
+                val x = canvasWidth * i / markerCount
+                val time = timeRange.start.plusHours(i.toLong())
+
+                drawContext.canvas.nativeCanvas.drawText(
+                    time.format(DateTimeFormatter.ofPattern("HH:mm")),
+                    x,
+                    canvasHeight - 5.dp.toPx(),
+                    paint
+                )
+            }
+        }
+        // 2H view - show every 30 minutes
+        else -> {
+            val markerCount = 4
+            (0..markerCount).forEach { i ->
+                val x = canvasWidth * i / markerCount
+                val time = timeRange.start.plusMinutes((i * 30).toLong())
+
+                drawContext.canvas.nativeCanvas.drawText(
+                    time.format(DateTimeFormatter.ofPattern("HH:mm")),
+                    x,
+                    canvasHeight - 5.dp.toPx(),
+                    paint
+                )
+            }
+        }
+    }
+}
+private fun drawYAxisLabels(
     canvasHeight: Float,
     minValue: Float,
     maxValue: Float,
@@ -876,7 +976,7 @@ private fun DrawScope.drawDataLine(
                 color = phaseColor,
                 start = prevPoint,
                 end = currentPoint,
-                strokeWidth = 3.dp.toPx(),
+                strokeWidth = 1.dp.toPx(),
                 cap = StrokeCap.Round
             )
         }
@@ -890,7 +990,7 @@ private fun DrawScope.drawDataLine(
                 color = lineColor,
                 start = prevPoint,
                 end = currentPoint,
-                strokeWidth = 3.dp.toPx(),
+                strokeWidth = 1.dp.toPx(),
                 cap = StrokeCap.Round
             )
         }
@@ -901,7 +1001,7 @@ private fun DrawScope.drawLatestPointIndicator(latestPoint: Offset, lineColor: C
     // Outer pulse ring
     drawCircle(
         lineColor.copy(alpha = 0.3f),
-        radius = 8.dp.toPx(),
+        radius = 6.dp.toPx(),
         center = latestPoint
     )
     // Inner solid circle
@@ -954,14 +1054,6 @@ private fun EnhancedTimeLabels(
                     abs(it.key - midPointTime)
                 }?.value
 
-                if (cyclePhase != null && cyclePhase != CyclePhase.UNKNOWN) {
-                    Text(
-                        text = cyclePhase.name.take(3),
-                        color = getCycleColor(cyclePhase),
-                        fontSize = 7.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
             }
 
             Text(
@@ -975,16 +1067,6 @@ private fun EnhancedTimeLabels(
             )
         }
 
-        // Time period indicator
-        Text(
-            text = when {
-                zoomLevel.hours >= 24 -> "${zoomLevel.hours / 24}D View"
-                else -> "${zoomLevel.hours}H View"
-            },
-            color = WhiteText.copy(alpha = 0.5f),
-            fontSize = 7.sp,
-            modifier = Modifier.align(Alignment.CenterHorizontally)
-        )
     }
 }
 

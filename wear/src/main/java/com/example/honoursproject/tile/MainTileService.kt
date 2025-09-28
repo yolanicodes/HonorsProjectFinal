@@ -113,7 +113,7 @@ class MainTileService : SuspendingTileService() {
 
     override fun onCreate() {
         super.onCreate()
-       WorkoutSimulationManager.startMonitoring(this, "P102-Workout_Data.csv")
+       //WorkoutSimulationManager.startMonitoring(this, "P102-Workout_Data.csv")
 
         dataCollectionJob = serviceScope.launch {
             launch {
