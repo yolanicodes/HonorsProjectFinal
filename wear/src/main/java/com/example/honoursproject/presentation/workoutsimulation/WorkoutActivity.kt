@@ -914,41 +914,40 @@ fun ScrollableWorkoutScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(horizontal = 16.dp) // Add some horizontal padding to the content
+                .padding(horizontal = 8.dp) // Add some horizontal padding to the content
                 .verticalScroll(scrollState)
                 .padding(8.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+            verticalArrangement = Arrangement.spacedBy(2.dp)
         ) {
             // Header with workout type and elapsed time
             Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                modifier = Modifier.padding(vertical = 4.dp)
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.size(26.dp).background(iconBlue, CircleShape),) {
-                    val icon = if (workoutType.contains("walk", ignoreCase = true))
-                        R.drawable.steps_icon else R.drawable.run_icon
-                    Image(
-                        painterResource(id = icon),
-                        contentDescription = null,
-                        modifier = Modifier.size(20.dp),
-                        colorFilter = ColorFilter.tint(WhiteText)
-                    )
 
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.padding(vertical = 4.dp).fillMaxSize()
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    // Circular background for the icon
+                    Box(modifier = Modifier.size(24.dp).background(iconBlue, CircleShape),
+                        contentAlignment = Alignment.Center) {
+                        val icon = if (workoutType.contains("walk", ignoreCase = true))
+                            R.drawable.steps_icon else R.drawable.run_icon
+                        Image(
+                            painterResource(id = icon),
+                            contentDescription = "$workoutType icon",
+                            modifier = Modifier.size(20.dp),
+                            colorFilter = ColorFilter.tint(WhiteText)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
                     Text(
                         formatElapsedTime(elapsedTime),
-                        fontSize = 26.sp,
+                        fontSize = 24.sp,
                         fontWeight = FontWeight.Bold,
                         color = WhiteText
-                    )
-                }
-                if (isPaused) {
-                    Text(
-                        text = "PAUSED",
-                        color = menstrualRed,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold
                     )
                 }
             }
@@ -960,21 +959,33 @@ fun ScrollableWorkoutScreen(
             ) {
                 HeartRateZones(currentZone)
                 Spacer(Modifier.height(8.dp))
-                MetricRow(
-                    iconRes = R.drawable.heart_icon,
-                    label = "BPM",
-                    value = heartRate.toString(),
-                    valueColor = menstrualRed,
-                    iconTint = menstrualRed
-                )
                 Text(
-                    text = "Zone ${currentZone.ordinal + 1}",
-                    color = currentZone.color,
-                    fontSize = 12.sp,
+                    text = "WORKOUT DETAILS",
+                    color = Color.Gray,
+                    fontSize = 14.sp,
                     fontWeight = FontWeight.Medium
                 )
-            }
+                Spacer(Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    MetricRow(
+                        iconRes = R.drawable.heart_icon,
+                        label = "BPM",
+                        value = heartRate.toString(),
+                        valueColor = menstrualRed,
+                        iconTint = menstrualRed
+                    )
+                    Spacer(Modifier.width(5.dp))
+                    MetricColumn(label = "AVG HR", value = avgHeartRate.toString())
+                }
 
+            }
+            Spacer(Modifier.height(5.dp))
             // Primary Metrics Row
             Row(
                 modifier = Modifier
@@ -983,9 +994,10 @@ fun ScrollableWorkoutScreen(
                 horizontalArrangement = Arrangement.SpaceEvenly,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                MetricColumn(label = "KCAL", value = energy.toString())
+                MetricColumn(label = "KCAL", value = String.format(Locale.getDefault(), "%.2f",energy))
+                Spacer(Modifier.width(4.dp))
                 MetricColumn(label = "KM", value = String.format(Locale.getDefault(), "%.2f", distance))
-
+                Spacer(Modifier.width(4.dp))
                 // Cycle information
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -995,7 +1007,7 @@ fun ScrollableWorkoutScreen(
                             modifier = Modifier.size(18.dp),
                             colorFilter = ColorFilter.tint(getCyclePhaseColor(cycleInfo.phase))
                         )
-                        Spacer(Modifier.width(4.dp))
+                        Spacer(Modifier.width(2.dp))
                         Text(
                             text = cycleInfo.dayOfCycle.toString(),
                             fontSize = 16.sp,
@@ -1003,50 +1015,7 @@ fun ScrollableWorkoutScreen(
                             fontWeight = FontWeight.Bold
                         )
                     }
-                    Text(
-                        text = "CYCLE",
-                        fontSize = 10.sp,
-                        color = WhiteText
-                    )
-                }
-            }
 
-            // Secondary Metrics Section
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                modifier = Modifier.padding(vertical = 8.dp)
-            ) {
-                Text(
-                    text = "WORKOUT DETAILS",
-                    color = Color.Gray,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceEvenly
-                ) {
-                    MetricColumn(label = "AVG HR", value = avgHeartRate.toString())
-                    MetricColumn(label = "BASAL", value = basalEnergy.toString())
-                }
-
-                Spacer(modifier = Modifier.height(12.dp))
-
-                // Cycle Phase Information
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(
-                        text = "CYCLE PHASE",
-                        color = Color.Gray,
-                        fontSize = 10.sp
-                    )
-                    Text(
-                        text = cycleInfo.phase.name,
-                        color = getCyclePhaseColor(cycleInfo.phase),
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold
-                    )
                 }
             }
 
@@ -1056,45 +1025,15 @@ fun ScrollableWorkoutScreen(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     modifier = Modifier.padding(vertical = 8.dp)
                 ) {
-                    Text(
-                        text = "ZONE TIME DISTRIBUTION",
-                        color = Color.Gray,
-                        fontSize = 10.sp
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
+
                     HeartZoneGraph(zoneDistribution = zoneDistribution)
                 }
             }
 
-            // Simulation Progress (if in evaluation mode)
-            if (isEvaluationMode && simulationProgress.totalRecords > 0) {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier = Modifier.padding(vertical = 8.dp)
-                ) {
-                    Text(
-                        text = "SIMULATION PROGRESS",
-                        color = Color.Gray,
-                        fontSize = 10.sp
-                    )
-                    Text(
-                        text = "${simulationProgress.currentIndex}/${simulationProgress.totalRecords}",
-                        color = follicleGreen,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium
-                    )
-                    if (simulationProgress.isSyncing) {
-                        Text(
-                            text = "Syncing data...",
-                            color = menstrualRed,
-                            fontSize = 10.sp
-                        )
-                    }
-                }
-            }
+
 
             // Control Buttons - Always at bottom with some extra padding
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(8.dp))
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1292,12 +1231,6 @@ fun HeartZoneGraph(zoneDistribution: Map<Int, Long>) {
                 }
             }
         }
-        Spacer(Modifier.height(8.dp))
-        Text(
-            text = "Total workout time: ${formatElapsedTime(totalTime.toLong())}",
-            color = Color.Gray,
-            fontSize = 10.sp
-        )
     }
 }
 
@@ -1343,7 +1276,7 @@ fun MetricColumn(label: String, value: String) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Text(
             text = value,
-            fontSize = 20.sp,
+            fontSize = 16.sp,
             color = WhiteText,
             fontWeight = FontWeight.SemiBold
         )

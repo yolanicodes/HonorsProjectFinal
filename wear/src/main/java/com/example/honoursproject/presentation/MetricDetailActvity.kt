@@ -229,13 +229,23 @@ class MetricDetailViewModel(
 
     // Load data for evaluation mode
     private suspend fun loadEvaluationModeData(zoomLevel: ZoomLevel) {
+        // Wait for historical data to finish loading if it hasn't yet
+        if (!SimulationManager.isHistoricalLoadingComplete.value) {
+            Log.i("MetricDetailViewModel", "Waiting for historical data to load...")
+
+            // Show loading progress
+            SimulationManager.historicalLoadingProgress.collect { progress ->
+                if (progress >= 1f) {
+                    return@collect // Data loaded
+                }
+            }
+        }
+
         when {
             zoomLevel.hours <= 24 -> {
-                // Current day view - use data from 2023-08-19 mapped to current time
                 loadCurrentDayData(zoomLevel)
             }
             else -> {
-                // Weekly view - use historical data from 2023-08-01 to 2023-08-12
                 loadHistoricalWeekData(zoomLevel)
             }
         }
@@ -847,6 +857,7 @@ private fun DrawScope.drawXAxisLabels(
     zoomLevel: ZoomLevel,
     cycleData: Map<Long, CyclePhase>
 ) {
+
     val paint = Paint().apply {
         color = WhiteText.toArgb()
         textSize = 8.sp.toPx()
@@ -854,12 +865,13 @@ private fun DrawScope.drawXAxisLabels(
     }
 
     when {
-        // Weekly view - show cycle days
+        // Weekly view - show cycle days (matching StepAnalyticsActivity)
         zoomLevel.hours >= 168 -> {
             val markerCount = data.size.coerceAtMost(7)
             (0 until markerCount).forEach { i ->
                 val x = canvasWidth * (i + 0.5f) / markerCount.coerceAtLeast(1)
-                val dataIndex = (i * data.size / markerCount.coerceAtLeast(1)).coerceIn(0, data.size - 1)
+                val dataIndex = (i * data.size / markerCount.coerceAtLeast(1))
+                    .coerceIn(0, data.size - 1)
 
                 if (dataIndex < data.size) {
                     val dataPoint = data[dataIndex]
@@ -870,18 +882,19 @@ private fun DrawScope.drawXAxisLabels(
                         .toInstant()
                         .toEpochMilli()
 
-                    // Find cycle day from cycleData or estimate
+                    // Find cycle day from cycleData
                     val cycleDay = cycleData.entries.minByOrNull {
                         abs(it.key - date)
                     }?.let { entry ->
-                        // Calculate cycle day based on date difference
                         val daysDiff = ChronoUnit.DAYS.between(
-                            Instant.ofEpochMilli(entry.key).atZone(ZoneId.systemDefault()).toLocalDate(),
+                            Instant.ofEpochMilli(entry.key).atZone(ZoneId.systemDefault())
+                                .toLocalDate(),
                             Instant.ofEpochMilli(date).atZone(ZoneId.systemDefault()).toLocalDate()
                         )
                         ((daysDiff) % 28 + 1).toInt()
-                    } ?: (i + 1) // Fallback to sequential numbering
+                    } ?: (i + 1)
 
+                    // Draw cycle day label
                     drawContext.canvas.nativeCanvas.drawText(
                         "D$cycleDay",
                         x,
@@ -891,54 +904,57 @@ private fun DrawScope.drawXAxisLabels(
                 }
             }
         }
-        // 24H view - show every 4 hours
-        zoomLevel.hours >= 24 -> {
-            val markerCount = 6
-            (0..markerCount).forEach { i ->
-                val x = canvasWidth * i / markerCount
-                val hoursOffset = (i * 4) // Every 4 hours
-                val time = timeRange.start.plusHours(hoursOffset.toLong())
 
-                drawContext.canvas.nativeCanvas.drawText(
-                    time.format(DateTimeFormatter.ofPattern("HH:mm")),
-                    x,
-                    canvasHeight - 5.dp.toPx(),
-                    paint
-                )
+
+            // 24H view - show every 4 hours
+            zoomLevel.hours >= 24 -> {
+                val markerCount = 6
+                (0..markerCount).forEach { i ->
+                    val x = canvasWidth * i / markerCount
+                    val hoursOffset = (i * 4) // Every 4 hours
+                    val time = timeRange.start.plusHours(hoursOffset.toLong())
+
+                    drawContext.canvas.nativeCanvas.drawText(
+                        time.format(DateTimeFormatter.ofPattern("HH:mm")),
+                        x,
+                        canvasHeight - 5.dp.toPx(),
+                        paint
+                    )
+                }
             }
-        }
-        // 6H view - show every hour
-        zoomLevel.hours >= 6 -> {
-            val markerCount = 6
-            (0..markerCount).forEach { i ->
-                val x = canvasWidth * i / markerCount
-                val time = timeRange.start.plusHours(i.toLong())
+            // 6H view - show every hour
+            zoomLevel.hours >= 6 -> {
+                val markerCount = 6
+                (0..markerCount).forEach { i ->
+                    val x = canvasWidth * i / markerCount
+                    val time = timeRange.start.plusHours(i.toLong())
 
-                drawContext.canvas.nativeCanvas.drawText(
-                    time.format(DateTimeFormatter.ofPattern("HH:mm")),
-                    x,
-                    canvasHeight - 5.dp.toPx(),
-                    paint
-                )
+                    drawContext.canvas.nativeCanvas.drawText(
+                        time.format(DateTimeFormatter.ofPattern("HH:mm")),
+                        x,
+                        canvasHeight - 5.dp.toPx(),
+                        paint
+                    )
+                }
             }
-        }
-        // 2H view - show every 30 minutes
-        else -> {
-            val markerCount = 4
-            (0..markerCount).forEach { i ->
-                val x = canvasWidth * i / markerCount
-                val time = timeRange.start.plusMinutes((i * 30).toLong())
+            // 2H view - show every 30 minutes
+            else -> {
+                val markerCount = 4
+                (0..markerCount).forEach { i ->
+                    val x = canvasWidth * i / markerCount
+                    val time = timeRange.start.plusMinutes((i * 30).toLong())
 
-                drawContext.canvas.nativeCanvas.drawText(
-                    time.format(DateTimeFormatter.ofPattern("HH:mm")),
-                    x,
-                    canvasHeight - 5.dp.toPx(),
-                    paint
-                )
+                    drawContext.canvas.nativeCanvas.drawText(
+                        time.format(DateTimeFormatter.ofPattern("HH:mm")),
+                        x,
+                        canvasHeight - 5.dp.toPx(),
+                        paint
+                    )
+                }
             }
         }
     }
-}
+
 private fun drawYAxisLabels(
     canvasHeight: Float,
     minValue: Float,

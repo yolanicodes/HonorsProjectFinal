@@ -69,6 +69,8 @@ object SimulationManager {
     private var lastBatchInsert = 0L
     private const val batchSize = 50
     private const val batchTimeoutMs = 30000L
+    private var evaluationModeStartSystemTime: LocalDateTime? = null
+    private var historicalDataLoadComplete = false
 
     // Simulation data state
     private var lastUiUpdate = 0L
@@ -113,7 +115,39 @@ object SimulationManager {
             }
             .first()
     }
+    private suspend fun initializeCumulativeValuesFromHistoricalData(context: Context) {
+        if (!EvaluationState.isEvaluationMode.value) return
 
+        try {
+            val archiveDao = ArchiveDatabase.getInstance(context).archiveRecordDao()
+            val boundarySystemTime = evaluationModeStartSystemTime ?: LocalDateTime.now()
+            val boundaryTimestamp = LocalDateTime.of(
+                EvaluationState.EVALUATION_DATE,
+                boundarySystemTime.toLocalTime()
+            ).atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
+
+            // Get the last historical record before the boundary
+            val dayStart = EvaluationState.EVALUATION_DATE.atStartOfDay(ZoneId.systemDefault())
+                .toInstant().toEpochMilli()
+
+            val historicalRecords = archiveDao.getRecordsBetween(dayStart, boundaryTimestamp)
+
+            if (historicalRecords.isNotEmpty()) {
+                val lastHistoricalRecord = historicalRecords.maxByOrNull { it.timestamp }
+
+                if (lastHistoricalRecord != null) {
+                    cumulativeSteps = lastHistoricalRecord.stepCount
+                    cumulativeEnergy = lastHistoricalRecord.activeEnergyBurned
+
+                    Log.i("SimulationManager",
+                        "Initialized cumulative values from historical data: " +
+                                "Steps=$cumulativeSteps, Energy=$cumulativeEnergy")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("SimulationManager", "Error initializing from historical data", e)
+        }
+    }
     fun startStreaming(context: Context, csvFileName: String) {
         if (simulationJob?.isActive == true) {
             Log.i("SimulationManager", "Simulation already running")
@@ -123,7 +157,10 @@ object SimulationManager {
         simulationJob = scope.launch {
             try {
                 Log.i("SimulationManager", "Starting health data simulation")
-
+                if (EvaluationState.isEvaluationMode.value && evaluationModeStartSystemTime == null) {
+                    evaluationModeStartSystemTime = LocalDateTime.now()
+                    Log.i("SimulationManager", "Evaluation mode start system time: $evaluationModeStartSystemTime")
+                }
                 // Update simulation state
                 _simulationState.value = _simulationState.value.copy(isRunning = true)
 
@@ -191,6 +228,39 @@ object SimulationManager {
                                 "SimulationManager",
                                 "Background historical data loading completed"
                             )
+                            suspend fun initializeCumulativeValuesFromHistoricalData(context: Context) {
+                                if (!EvaluationState.isEvaluationMode.value) return
+
+                                try {
+                                    val archiveDao = ArchiveDatabase.getInstance(context).archiveRecordDao()
+                                    val boundarySystemTime = evaluationModeStartSystemTime ?: LocalDateTime.now()
+                                    val boundaryTimestamp = LocalDateTime.of(
+                                        EvaluationState.EVALUATION_DATE,
+                                        boundarySystemTime.toLocalTime()
+                                    ).atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
+
+                                    // Get the last historical record before the boundary
+                                    val dayStart = EvaluationState.EVALUATION_DATE.atStartOfDay(ZoneId.systemDefault())
+                                        .toInstant().toEpochMilli()
+
+                                    val historicalRecords = archiveDao.getRecordsBetween(dayStart, boundaryTimestamp)
+
+                                    if (historicalRecords.isNotEmpty()) {
+                                        val lastHistoricalRecord = historicalRecords.maxByOrNull { it.timestamp }
+
+                                        if (lastHistoricalRecord != null) {
+                                            cumulativeSteps = lastHistoricalRecord.stepCount
+                                            cumulativeEnergy = lastHistoricalRecord.activeEnergyBurned
+
+                                            Log.i("SimulationManager",
+                                                "Initialized cumulative values from historical data: " +
+                                                        "Steps=$cumulativeSteps, Energy=$cumulativeEnergy")
+                                        }
+                                    }
+                                } catch (e: Exception) {
+                                    Log.e("SimulationManager", "Error initializing from historical data", e)
+                                }
+                            }
                         } catch (e: Exception) {
                             Log.e(
                                 "SimulationManager",
@@ -668,6 +738,8 @@ object SimulationManager {
             Log.i("SimulationManager", "Simulation reset to initial state")
         }
     }
+    fun isHistoricalDataLoaded(): Boolean = historicalDataLoadComplete
+    fun getHistoricalLoadingProgress(): Float = _historicalLoadingProgress.value
 
     // Public getters for enhanced state monitoring
     fun getCumulativeSteps(): Int = cumulativeSteps
@@ -770,9 +842,10 @@ object SimulationManager {
         startDate: LocalDate,
         endDate: LocalDate
     ) {
-        Log.i("SimulationManager", "Loading historical data from $startDate to $endDate for step analytics")
+        Log.i("SimulationManager", "Loading historical data from $startDate to $endDate")
         _historicalLoadingProgress.value = 0f
         _isHistoricalLoadingComplete.value = false
+
         try {
             val header = allLines.first()
             val dataLines = allLines.drop(1)
@@ -784,24 +857,37 @@ object SimulationManager {
             val archiveDb = ArchiveDatabase.getInstance(context)
             val archiveDao = archiveDb.archiveRecordDao()
 
-            // CRITICAL FIX: Use the actual date range from evaluation state
-            val evaluationStartDate = EvaluationState.HISTORICAL_START_DATE  // 2023-08-01
-            val evaluationEndDate = EvaluationState.HISTORICAL_END_DATE      // 2023-08-18
+            // CRITICAL: Use system time at simulation start as the boundary
+            val boundarySystemTime = evaluationModeStartSystemTime ?: LocalDateTime.now()
+            val boundaryTime = LocalDateTime.of(EvaluationState.EVALUATION_DATE, boundarySystemTime.toLocalTime())
 
-            Log.i("SimulationManager", "Pre-filtering data for date range: $evaluationStartDate to $evaluationEndDate")
+            Log.i("SimulationManager", "Historical boundary time: $boundaryTime (system time at start: $boundarySystemTime)")
 
-            // Pre-filter data for the correct date range - do this in memory first
+            // Pre-filter data for historical records only
             val relevantRecords = dataLines.mapNotNull { line ->
                 try {
                     val values = line.split(',')
                     val recordTime = LocalDateTime.parse(values[startTimeIndex], formatter)
                     val recordDate = recordTime.toLocalDate()
 
-                    // Check if the record falls within our evaluation historical range
-                    if (!recordDate.isBefore(evaluationStartDate) && !recordDate.isAfter(evaluationEndDate)) {
+                    // Check if record is within date range AND before boundary time
+                    val isWithinDateRange = !recordDate.isBefore(startDate) && !recordDate.isAfter(endDate)
+
+                    // For evaluation date (2023-08-19), only include records before the boundary time
+                    val isHistorical = if (recordDate.isEqual(EvaluationState.EVALUATION_DATE)) {
+                        recordTime.toLocalTime().isBefore(boundaryTime.toLocalTime())
+                    } else {
+                        recordDate.isBefore(EvaluationState.EVALUATION_DATE)
+                    }
+
+                    if (isWithinDateRange && isHistorical) {
                         val record = parseRecord(values, columnIndexMap, HealthDataRecord())
-                        val historicalTimestamp = recordTime.atZone(ZoneId.systemDefault())
-                            .toInstant().toEpochMilli()
+
+                        // Map to evaluation year while preserving original time
+                        val historicalTimestamp = LocalDateTime.of(recordDate, recordTime.toLocalTime())
+                            .atZone(ZoneId.systemDefault())
+                            .toInstant()
+                            .toEpochMilli()
 
                         ArchiveRecordEntity(
                             timestamp = historicalTimestamp,
@@ -819,43 +905,40 @@ object SimulationManager {
                         null
                     }
                 } catch (e: Exception) {
-                    null // Skip invalid records
+                    null
                 }
             }
 
-            Log.i("SimulationManager", "Found ${relevantRecords.size} relevant historical records for batch insert")
+            Log.i("SimulationManager", "Found ${relevantRecords.size} historical records (before $boundaryTime)")
 
             if (relevantRecords.isNotEmpty()) {
-
                 val batchSize = 500
                 var insertedCount = 0
-                val totalRecords = relevantRecords.size
+
                 relevantRecords.chunked(batchSize).forEach { batch ->
                     try {
                         archiveDao.insertBatch(batch)
                         insertedCount += batch.size
 
-                        val progress = insertedCount.toFloat() / totalRecords.toFloat()
-                        _historicalLoadingProgress.value = progress
+                        _historicalLoadingProgress.value = insertedCount.toFloat() / relevantRecords.size
 
-                        Log.d("SimulationManager", "Batch inserted $insertedCount/${relevantRecords.size} records")
-
-                        // Small delay to prevent overwhelming the system
                         delay(10)
                     } catch (e: Exception) {
                         Log.e("SimulationManager", "Error inserting batch: ${e.message}")
                     }
                 }
-                _historicalLoadingProgress.value = 1f
+
+                historicalDataLoadComplete = true
                 _isHistoricalLoadingComplete.value = true
-                Log.i("SimulationManager", "Successfully batch-inserted $insertedCount historical records")
-            }
-            else{
-                _isHistoricalLoadingComplete.value=true
+                Log.i("SimulationManager", "Successfully loaded $insertedCount historical records")
+            } else {
+                historicalDataLoadComplete = true
+                _isHistoricalLoadingComplete.value = true
             }
 
         } catch (e: Exception) {
-            Log.e("SimulationManager", "Error loading historical data for step analytics", e)
+            Log.e("SimulationManager", "Error loading historical data", e)
+            _isHistoricalLoadingComplete.value = true
         }
     }
 
