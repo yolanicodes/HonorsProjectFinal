@@ -47,7 +47,7 @@ import java.time.temporal.ChronoUnit
 import kotlin.math.*
 
 // Data classes
-data class DataPoint(val time: Long, val value: Float, val cycleDay: Int = 0)
+data class DataPoint(val time: Long, val value: Float)
 data class TimeRange(val start: LocalDateTime, val end: LocalDateTime)
 data class ZoomLevel(val name: String, val hours: Long, val displayFormat: String)
 
@@ -275,8 +275,8 @@ class MetricDetailViewModel(
                     WatchfaceTileService.METRIC_STEPS -> entity.stepCount.toFloat()
                     WatchfaceTileService.METRIC_ENERGY -> entity.activeEnergyBurned.toFloat()
                     else -> 0f
-                } // Assuming cycleDay from entity, if available. For now, use 0.
-                DataPoint(time = entity.timestamp, value = value, cycleDay = entity.cycleDay)
+                }
+                DataPoint(time = entity.timestamp, value = value)
             }
 
             // Add current live data if it falls within the time window
@@ -289,7 +289,7 @@ class MetricDetailViewModel(
                     WatchfaceTileService.METRIC_ENERGY -> liveRecord.activeEnergyBurned.toFloat()
                     else -> 0f
                 }
-                dataPoints + DataPoint(currentTime, liveValue, liveRecord.cycleDay)
+                dataPoints + DataPoint(currentTime, liveValue)
             } else {
                 dataPoints
             }
@@ -353,8 +353,7 @@ class MetricDetailViewModel(
 
                     DataPoint(
                         time = date.atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli(),
-                        value = value,
-                        cycleDay = records.firstOrNull()?.cycleDay ?: 0 // Use cycle day from the first record of the day
+                        value = value
                     )
                 }
                 .sortedBy { it.time }
@@ -417,7 +416,7 @@ class MetricDetailViewModel(
                         WatchfaceTileService.METRIC_ENERGY -> entity.activeEnergyBurned.toFloat()
                         else -> 0f
                     }
-                    DataPoint(time = entity.timestamp, value = value, cycleDay = entity.cycleDay)
+                    DataPoint(time = entity.timestamp, value = value)
                 }
 
                 // Add live data if current time falls within window
@@ -430,7 +429,7 @@ class MetricDetailViewModel(
                         WatchfaceTileService.METRIC_ENERGY -> liveRecord.activeEnergyBurned.toFloat()
                         else -> 0f
                     }
-                    (dbData + DataPoint(currentTime, liveValue, liveRecord.cycleDay)).sortedBy { it.time }
+                    (dbData + DataPoint(currentTime, liveValue)).sortedBy { it.time }
                 } else {
                     dbData.sortedBy { it.time }
                 }
@@ -482,8 +481,7 @@ class MetricDetailViewModel(
 
                         DataPoint(
                             time = date.atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli(),
-                            value = value,
-                            cycleDay = records.firstOrNull()?.cycleDay ?: 0
+                            value = value
                         )
                     }
                     .sortedBy { it.time }
@@ -876,12 +874,29 @@ private fun DrawScope.drawXAxisLabels(
                     .coerceIn(0, data.size - 1)
 
                 if (dataIndex < data.size) {
-                    // Use the cycle day directly from the data point
-                    val cycleDay = data[dataIndex].cycleDay.takeIf { it > 0 } ?: (i + 1)
+                    val dataPoint = data[dataIndex]
+                    val date = Instant.ofEpochMilli(dataPoint.time)
+                        .atZone(ZoneId.systemDefault())
+                        .toLocalDate()
+                        .atStartOfDay(ZoneId.systemDefault())
+                        .toInstant()
+                        .toEpochMilli()
+
+                    // Find cycle day from cycleData
+                    val cycleDay = cycleData.entries.minByOrNull {
+                        abs(it.key - date)
+                    }?.let { entry ->
+                        val daysDiff = ChronoUnit.DAYS.between(
+                            Instant.ofEpochMilli(entry.key).atZone(ZoneId.systemDefault())
+                                .toLocalDate(),
+                            Instant.ofEpochMilli(date).atZone(ZoneId.systemDefault()).toLocalDate()
+                        )
+                        ((daysDiff) % 28 + 1).toInt()
+                    } ?: (i + 1)
 
                     // Draw cycle day label
                     drawContext.canvas.nativeCanvas.drawText(
-                        "$cycleDay",
+                        "D$cycleDay",
                         x,
                         canvasHeight - 5.dp.toPx(),
                         paint
