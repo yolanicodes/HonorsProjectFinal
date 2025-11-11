@@ -308,6 +308,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private val requestPermissionLauncher =
+
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted: Boolean ->
             if (isGranted) {
                 viewModel.startSimulation()
