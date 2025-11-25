@@ -6,7 +6,7 @@ import kotlinx.coroutines.flow.Flow
 
 @Entity(tableName = "health_records")
 data class HealthRecordEntity(
-    @PrimaryKey val timestamp: Long,
+    @PrimaryKey val timestamp: Long, // Fixed: removed autoGenerate = true
     val heartRate: Double,
     val stepCount: Int,
     val activeEnergyBurned: Double,
@@ -17,18 +17,17 @@ data class HealthRecordEntity(
     val restingHeartRate: Double,
     val basalBodyTemperature: Double
 )
-
 @Dao
 interface HealthRecordDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertBatch(records: List<HealthRecordEntity>)
-
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(record: HealthRecordEntity)
 
     @Query("SELECT * FROM health_records WHERE timestamp >= :since ORDER BY timestamp ASC")
     fun getRecordsSince(since: Long): Flow<List<HealthRecordEntity>>
 
+    // FIXED: Add the missing methods that MetricDetailViewModel is trying to use
     @Query("SELECT * FROM health_records WHERE timestamp BETWEEN :startTime AND :endTime ORDER BY timestamp ASC")
     suspend fun getRecordsBetween(startTime: Long, endTime: Long): List<HealthRecordEntity>
 
@@ -37,18 +36,14 @@ interface HealthRecordDao {
 
     @Query("DELETE FROM health_records WHERE timestamp < :cutoff")
     suspend fun deleteOlderThan(cutoff: Long)
-
-    @Query("SELECT * FROM health_records ORDER BY timestamp DESC LIMIT 1")
-    suspend fun getLatestRecord(): HealthRecordEntity?
 }
 
-@Database(entities = [HealthRecordEntity::class], version = 4)  // Incremented version
+@Database(entities = [HealthRecordEntity::class], version = 3)
 abstract class HealthDatabase : RoomDatabase() {
     abstract fun healthRecordDao(): HealthRecordDao
 
     companion object {
-        @Volatile
-        private var INSTANCE: HealthDatabase? = null
+        @Volatile private var INSTANCE: HealthDatabase? = null
 
         fun getInstance(context: Context): HealthDatabase {
             return INSTANCE ?: synchronized(this) {
@@ -56,10 +51,7 @@ abstract class HealthDatabase : RoomDatabase() {
                     context.applicationContext,
                     HealthDatabase::class.java,
                     "health_db"
-                )
-                    .fallbackToDestructiveMigration()  // For development - remove in production
-                    .build()
-                    .also { INSTANCE = it }
+                ).build().also { INSTANCE = it }
             }
         }
     }

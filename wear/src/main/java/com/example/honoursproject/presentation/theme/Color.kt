@@ -42,4 +42,3 @@ val TILE_CyanHZ = CyanHZ.toTileColorProp()
 val TILE_lutealPurple = lutealPurple.toTileColorProp()
 val TILE_follicleGreen = follicleGreen.toTileColorProp()
 val TILE_maroonHZ= maroonHZ.toTileColorProp()
-

@@ -1,10 +1,8 @@
 package com.example.honoursproject.tile
 
 import android.annotation.SuppressLint
-import android.content.ContentValues.TAG
 import android.util.Log
 import androidx.wear.protolayout.ActionBuilders
-import androidx.wear.protolayout.ColorBuilders
 import androidx.wear.protolayout.DimensionBuilders.dp
 import androidx.wear.protolayout.DimensionBuilders.degrees
 import androidx.wear.protolayout.DimensionBuilders.sp
@@ -26,10 +24,7 @@ import androidx.wear.tiles.RequestBuilders
 import androidx.wear.tiles.TileBuilders
 import com.example.honoursproject.R
 import com.example.honoursproject.CyclePhase
-import com.example.honoursproject.dataservices.HealthDataRecord
-import com.example.honoursproject.dataservices.HealthDataSnapshot
-import com.example.honoursproject.dataservices.HealthDataStreamManager
-import com.example.honoursproject.dataservices.IntentExtras
+import com.example.honoursproject.dataservices.SimulationManager
 import com.example.honoursproject.presentation.SetupPreferences
 import com.example.honoursproject.presentation.setupDataStore
 import com.example.honoursproject.presentation.theme.*
@@ -39,11 +34,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import java.util.concurrent.atomic.AtomicLong
+import java.util.Locale
 import kotlin.math.min
 
 data class MenstrualCycleInfo(
@@ -56,16 +49,6 @@ class StepCountTileService : SuspendingTileService() {
     override val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var dataCollectionJob: Job? = null
 
-    // Cache management
-    @Volatile
-    private var cachedHealthData = HealthDataRecord()
-    private val cacheExpiryMs = 30000L // 30 seconds
-    private var lastCacheUpdate = 0L
-
-    // Update throttling
-    private val lastUpdateTime = AtomicLong(0)
-    private val minUpdateInterval = 5000L // 5 seconds minimum between tile updates
-
     companion object {
         private const val CYCLE_ICON_ID = "cycle_icon"
         const val EXTRA_LAUNCHED_FROM = "launched_from"
@@ -75,41 +58,10 @@ class StepCountTileService : SuspendingTileService() {
 
     override fun onCreate() {
         super.onCreate()
-
-        // Cancel any existing job
-        dataCollectionJob?.cancel()
-
         dataCollectionJob = serviceScope.launch {
-            // Wait for historical data to be loaded first
-            HealthDataStreamManager.dataStream
-                .filter { it.isHistoricalDataLoaded }
-                .first()
-
-            Log.d(TAG, "Historical data loaded, starting step count tile updates")
-
-            // Now collect all subsequent emissions
-            HealthDataStreamManager.dataStream
-                .distinctUntilChanged { old, new ->
-                    // Only update if relevant fields changed
-                    old.cumulativeSteps == new.cumulativeSteps &&
-                            old.cyclePhase == new.cyclePhase &&
-                            old.cycleDay == new.cycleDay
-                }
-                .collect { snapshot ->
-                    val currentTime = System.currentTimeMillis()
-                    if (currentTime - lastUpdateTime.get() >= minUpdateInterval) {
-                        Log.d(TAG, "Step count data changed - updating tile: " +
-                                "Steps=${snapshot.cumulativeSteps}, " +
-                                "Cycle=${snapshot.cyclePhase} D${snapshot.cycleDay}")
-
-                        // Update cache
-                        updateCacheFromSnapshot(snapshot)
-
-                        // Request tile update
-                        requestTileUpdate()
-                        lastUpdateTime.set(currentTime)
-                    }
-                }
+            SimulationManager.healthDataStream.collect {
+                getUpdater(this@StepCountTileService).requestUpdate(StepCountTileService::class.java)
+            }
         }
     }
 
@@ -118,36 +70,7 @@ class StepCountTileService : SuspendingTileService() {
         dataCollectionJob?.cancel()
     }
 
-    private fun updateCacheFromSnapshot(snapshot: HealthDataSnapshot) {
-        try {
-            cachedHealthData = HealthDataRecord(
-                heartRate = snapshot.heartRate,
-                stepCount = snapshot.cumulativeSteps,
-                activeEnergyBurned = snapshot.cumulativeEnergyBurned,
-                cyclePhase = snapshot.cyclePhase,
-                cycleDay = snapshot.cycleDay,
-                basalEnergyBurned = snapshot.basalEnergyBurned,
-                vo2Max = snapshot.vo2Max,
-                restingHeartRate = snapshot.restingHeartRate,
-                basalBodyTemperature = snapshot.basalBodyTemperature
-            )
-            lastCacheUpdate = System.currentTimeMillis()
-        } catch (e: Exception) {
-            Log.e(TAG, "Error updating cache from snapshot", e)
-        }
-    }
-
-    private fun requestTileUpdate() {
-        try {
-            getUpdater(this).requestUpdate(StepCountTileService::class.java)
-        } catch (e: Exception) {
-            Log.e(TAG, "Error requesting tile update", e)
-        }
-    }
-
-    override suspend fun resourcesRequest(
-        requestParams: RequestBuilders.ResourcesRequest
-    ): ResourceBuilders.Resources {
+    override suspend fun resourcesRequest(requestParams: RequestBuilders.ResourcesRequest): ResourceBuilders.Resources {
         return ResourceBuilders.Resources.Builder()
             .setVersion(RESOURCES_VERSION)
             .addIdToImageMapping(
@@ -163,21 +86,16 @@ class StepCountTileService : SuspendingTileService() {
             .build()
     }
 
-    override suspend fun tileRequest(
-        requestParams: RequestBuilders.TileRequest
-    ): TileBuilders.Tile {
+    override suspend fun tileRequest(requestParams: RequestBuilders.TileRequest): TileBuilders.Tile {
         val stepGoal = getStepGoal()
-        val snapshot = HealthDataStreamManager.getCurrentSnapshot()
-        val currentSteps = snapshot.cumulativeSteps
+        val currentSteps = SimulationManager.getCumulativeSteps()
+        Log.d("StepCountTileService", "Tile request - Steps: $currentSteps, Goal: $stepGoal")
+        val menstrualInfo = getMenstrualCycleInfo()
 
-        Log.d(TAG, "Tile request - Steps: $currentSteps, Goal: $stepGoal")
-
-        val menstrualInfo = getMenstrualCycleInfo(snapshot)
         val progressPercentage = if (stepGoal > 0) {
             min(currentSteps.toFloat() / stepGoal.toFloat(), 1.0f)
-        } else {
-            0f
-        }
+        } else 0f
+
         val progressDegrees = (progressPercentage * 360f).toInt()
         val goalAchieved = currentSteps >= stepGoal
 
@@ -199,13 +117,17 @@ class StepCountTileService : SuspendingTileService() {
             .build()
     }
 
-    private fun getMenstrualCycleInfo(snapshot: HealthDataSnapshot): MenstrualCycleInfo {
+    private fun getMenstrualCycleInfo(): MenstrualCycleInfo {
+        val healthData = SimulationManager.healthDataStream.value
         val phase = try {
-            CyclePhase.valueOf(snapshot.cyclePhase.uppercase())
+            CyclePhase.valueOf(healthData.cyclePhase.uppercase(Locale.ROOT))
         } catch (e: IllegalArgumentException) {
             CyclePhase.UNKNOWN
         }
-        return MenstrualCycleInfo(phase = phase, dayOfCycle = snapshot.cycleDay)
+        return MenstrualCycleInfo(
+            phase = phase,
+            dayOfCycle = healthData.cycleDay
+        )
     }
 
     private fun createLayout(
@@ -216,7 +138,7 @@ class StepCountTileService : SuspendingTileService() {
         menstrualInfo: MenstrualCycleInfo
     ): LayoutElementBuilders.LayoutElement {
         val activityClassName = "${this.packageName}.presentation.StepAnalyticsActivity"
-        Log.d(TAG, "Setting up tile click to launch: $activityClassName")
+        Log.d("StepCountTileService", "Setting up tile click to launch: $activityClassName")
 
         return Box.Builder()
             .setWidth(dp(184f))
@@ -243,15 +165,9 @@ class StepCountTileService : SuspendingTileService() {
                                             .setPackageName(this.packageName)
                                             .setClassName("${this.packageName}.presentation.StepAnalyticsActivity")
                                             .addKeyToExtraMapping(
-                                                IntentExtras.EXTRA_CURRENT_STEPS,
+                                                StepCountTileService.EXTRA_CURRENT_STEPS,
                                                 ActionBuilders.AndroidIntExtra.Builder()
-                                                    .setValue(currentSteps)
-                                                    .build()
-                                            )
-                                            .addKeyToExtraMapping(
-                                                IntentExtras.EXTRA_LAUNCHED_FROM,
-                                                ActionBuilders.AndroidStringExtra.Builder()
-                                                    .setValue(IntentExtras.VALUE_STEP_TILE)
+                                                    .setValue(SimulationManager.getCumulativeSteps())
                                                     .build()
                                             )
                                             .build()
@@ -268,10 +184,7 @@ class StepCountTileService : SuspendingTileService() {
     }
 
     @SuppressLint("RestrictedApi")
-    private fun createProgressArc(
-        progressDegrees: Int,
-        goalAchieved: Boolean
-    ): LayoutElementBuilders.LayoutElement {
+    private fun createProgressArc(progressDegrees: Int, goalAchieved: Boolean): LayoutElementBuilders.LayoutElement {
         return Arc.Builder()
             .setAnchorAngle(degrees(-180f))
             .addContent(
@@ -352,9 +265,7 @@ class StepCountTileService : SuspendingTileService() {
             .build()
     }
 
-    private fun createMenstrualCycleDisplay(
-        info: MenstrualCycleInfo
-    ): LayoutElementBuilders.LayoutElement {
+    private fun createMenstrualCycleDisplay(info: MenstrualCycleInfo): LayoutElementBuilders.LayoutElement {
         val phaseColor = when (info.phase) {
             CyclePhase.MENSTRUATION -> TILE_menstrualRed
             CyclePhase.FOLLICULAR -> TILE_follicleGreen

@@ -1,8 +1,7 @@
-// Updated StepAnalyticsActivity.kt with requested changes
+// Updated StepAnalyticsActivity.kt with Interactive Bar Chart
 
 package com.example.honoursproject.presentation
 
-import android.annotation.SuppressLint
 import com.example.honoursproject.R
 import android.content.Context
 import android.graphics.Paint
@@ -16,6 +15,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.*
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
@@ -39,7 +39,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
-import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.viewModelScope
 import androidx.wear.compose.material.*
 import com.example.honoursproject.CyclePhase
@@ -49,7 +48,6 @@ import com.example.honoursproject.tile.StepCountTileService
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import java.time.LocalDate
@@ -77,8 +75,7 @@ data class MonthlyStepSummary(
     val currentSteps: Int,
     val maxSteps: Int,
     val isEvaluationMode: Boolean = false,
-    val evaluationDataIntegrity: Boolean = true,
-    val bestPerformingPhase: Pair<CyclePhase, Int>? = null
+    val evaluationDataIntegrity: Boolean = true
 )
 
 sealed class StepAnalyticsUiState {
@@ -91,6 +88,7 @@ class StepAnalyticsViewModel(
     private val context: Context,
     private val tileStepCount: Int = -1
 ) : ViewModel() {
+
     private val _uiState = MutableStateFlow<StepAnalyticsUiState>(StepAnalyticsUiState.Loading)
     val uiState: StateFlow<StepAnalyticsUiState> = _uiState.asStateFlow()
 
@@ -106,13 +104,22 @@ class StepAnalyticsViewModel(
                 val stepGoal = getStepGoal()
                 val isEvaluation = EvaluationState.isEvaluationMode.value
 
-                Log.d("StepAnalytics", "Loading data - Evaluation mode: $isEvaluation")
+                Log.d("StepAnalytics", "Loading data - Evaluation mode: $isEvaluation, Tile steps: $tileStepCount")
 
                 if (isEvaluation) {
-                    loadEvaluationModeData(stepGoal)
+                    // First verify that we have proper evaluation data
+                    val dataIntegrity = SimulationManager.verifyEvaluationModeData(context)
+                    Log.d("StepAnalytics", "Evaluation data integrity check: $dataIntegrity")
+
+                    if (!dataIntegrity) {
+                        Log.w("StepAnalytics", "Evaluation data integrity issue detected")
+                    }
+
+                    loadEvaluationModeData(stepGoal, dataIntegrity)
                 } else {
                     loadNormalModeData(stepGoal)
                 }
+
             } catch (e: Exception) {
                 Log.e("StepAnalytics", "Failed to load monthly data", e)
                 _uiState.value = StepAnalyticsUiState.Error("Failed to load step data: ${e.message}")
@@ -120,57 +127,60 @@ class StepAnalyticsViewModel(
         }
     }
 
+    private suspend fun loadEvaluationModeData(stepGoal: Int, dataIntegrity: Boolean) {
+        Log.d("StepAnalytics", "Loading evaluation mode data with integrity: $dataIntegrity")
 
-    private suspend fun loadEvaluationModeData(stepGoal: Int) {
-        Log.d("StepAnalytics", "Loading evaluation mode data")
         try {
-            // Wait for historical data to load
-            if (!HealthDataStreamManager.isHistoricalDataLoaded()) {
-                HealthDataStreamManager.dataStream
-                    .filter { it.isHistoricalDataLoaded }
-                    .first()
-            }
-
-            // Get daily step data from repository
-            val repository = HealthDataRepositoryImpl(
-                HealthDatabase.getInstance(context).healthRecordDao(),
-                ArchiveDatabase.getInstance(context).archiveRecordDao()
-            )
-
-            val dailyAggregates = repository.getDailyAggregates(
+            // Use the SimulationManager's getDailyStepDataForRange method
+            val dailyStepPairs = SimulationManager.getDailyStepDataForRange(
+                context,
                 EvaluationState.HISTORICAL_START_DATE,
                 EvaluationState.EVALUATION_DATE
             )
 
-            Log.d("StepAnalytics", "Retrieved ${dailyAggregates.size} daily aggregates")
+            Log.d("StepAnalytics", "Retrieved ${dailyStepPairs.size} daily step records from SimulationManager")
 
             val monthlyData = mutableListOf<DailyStepData>()
 
-            dailyAggregates.forEach { aggregate ->
+            // Convert the pairs to DailyStepData objects
+            dailyStepPairs.forEach { (date, steps) ->
+                // Get cycle information for each day
+                val (cyclePhase, cycleDay) = if (date == EvaluationState.EVALUATION_DATE) {
+                    // Current evaluation day - use live simulation data
+                    val currentHealthData = SimulationManager.healthDataStream.value
+                    Pair(parseCyclePhase(currentHealthData.cyclePhase), currentHealthData.cycleDay)
+                } else {
+                    // Historical days - get from archive data
+                    getHistoricalCycleInfo(date)
+                }
+
                 monthlyData.add(
                     DailyStepData(
-                        date = aggregate.date,
-                        stepCount = aggregate.totalSteps,
-                        goalAchieved = aggregate.totalSteps >= stepGoal,
-                        dayOfWeek = aggregate.date.dayOfWeek.name.take(3),
-                        cyclePhase = parseCyclePhase(""),  // Will get from archive
-                        cycleDay = 0  // Will get from archive
+                        date = date,
+                        stepCount = steps,
+                        goalAchieved = steps >= stepGoal,
+                        dayOfWeek = date.dayOfWeek.name.take(3),
+                        cyclePhase = cyclePhase,
+                        cycleDay = cycleDay
                     )
                 )
+
+                Log.d("StepAnalytics", "Evaluation day $date: Steps=$steps, Phase=$cyclePhase, Day=$cycleDay")
             }
 
-            // Get current snapshot for today's live data
-            val snapshot = HealthDataStreamManager.getCurrentSnapshot()
+            // Use tile step count for current day if available and valid
+            val currentSteps = if (tileStepCount > 0) {
+                tileStepCount
+            } else {
+                SimulationManager.getCumulativeSteps()
+            }
 
-            // Update today's data with live values
-            val today = EvaluationState.EVALUATION_DATE
+            // Update today's data with the most current step count
             val updatedMonthlyData = monthlyData.map { dayData ->
-                if (dayData.date == today) {
+                if (dayData.date == EvaluationState.EVALUATION_DATE) {
                     dayData.copy(
-                        stepCount = snapshot.cumulativeSteps,
-                        goalAchieved = snapshot.cumulativeSteps >= stepGoal,
-                        cyclePhase = parseCyclePhase(snapshot.cyclePhase),
-                        cycleDay = snapshot.cycleDay
+                        stepCount = currentSteps,
+                        goalAchieved = currentSteps >= stepGoal
                     )
                 } else {
                     dayData
@@ -181,22 +191,20 @@ class StepAnalyticsViewModel(
             val avgSteps = if (updatedMonthlyData.isNotEmpty()) totalSteps / updatedMonthlyData.size else 0
             val daysGoalAchieved = updatedMonthlyData.count { it.goalAchieved }
             val maxSteps = updatedMonthlyData.maxOfOrNull { it.stepCount } ?: stepGoal
-            val bestPhase = calculateBestPerformingPhase(updatedMonthlyData)
 
-            Log.d("StepAnalytics", "Evaluation summary - Total: $totalSteps, Avg: $avgSteps, Current: ${snapshot.cumulativeSteps}")
+            Log.d("StepAnalytics", "Evaluation summary - Total: $totalSteps, Avg: $avgSteps, Goals: $daysGoalAchieved, Current: $currentSteps")
 
             val summary = MonthlyStepSummary(
                 dailyData = updatedMonthlyData,
-                monthRange = "Aug 2023",
+                monthRange = "Aug 2023 (Evaluation)",
                 totalSteps = totalSteps,
                 avgSteps = avgSteps,
                 daysGoalAchieved = daysGoalAchieved,
                 stepGoal = stepGoal,
-                currentSteps = snapshot.cumulativeSteps,
+                currentSteps = currentSteps,
                 maxSteps = maxSteps,
                 isEvaluationMode = true,
-                evaluationDataIntegrity = true,
-                bestPerformingPhase = bestPhase
+                evaluationDataIntegrity = dataIntegrity
             )
 
             _uiState.value = StepAnalyticsUiState.Success(summary)
@@ -207,89 +215,64 @@ class StepAnalyticsViewModel(
         }
     }
 
-
     private suspend fun loadNormalModeData(stepGoal: Int) {
-        if (!HealthDataStreamManager.isHistoricalDataLoaded()) {
-            HealthDataStreamManager.dataStream
-                .filter { it.isHistoricalDataLoaded }
-                .first()
-        }
         val today = LocalDate.now()
         val startOfMonth = today.withDayOfMonth(1)
 
-        // Get repository
-        val repository = HealthDataRepositoryImpl(
-            HealthDatabase.getInstance(context).healthRecordDao(),
-            ArchiveDatabase.getInstance(context).archiveRecordDao()
+        // Use tile step count for current day if available
+        val currentSteps = if (tileStepCount > 0) {
+            Log.d("StepAnalytics", "Using tile step count: $tileStepCount")
+            tileStepCount
+        } else {
+            Log.d("StepAnalytics", "Using simulation manager step count: ${SimulationManager.getCumulativeSteps()}")
+            SimulationManager.getCumulativeSteps()
+        }
+
+        // Use SimulationManager's method for consistency
+        val dailyStepPairs = SimulationManager.getDailyStepDataForRange(
+            context,
+            startOfMonth,
+            today
         )
 
-        // Get daily aggregates from database
-        val dailyAggregates = repository.getDailyAggregates(startOfMonth, today)
+        val monthlyData = dailyStepPairs.map { (date, steps) ->
+            val (cyclePhase, cycleDay) = if (date == today) {
+                val currentHealthData = SimulationManager.healthDataStream.value
+                Pair(parseCyclePhase(currentHealthData.cyclePhase), currentHealthData.cycleDay)
+            } else {
+                getHistoricalCycleInfo(date)
+            }
 
-        val monthlyData = dailyAggregates.map { aggregate ->
+            val actualSteps = if (date == today) currentSteps else steps
+
             DailyStepData(
-                date = aggregate.date,
-                stepCount = aggregate.totalSteps,
-                goalAchieved = aggregate.totalSteps >= stepGoal,
-                dayOfWeek = aggregate.date.dayOfWeek.name.take(3),
-                cyclePhase = parseCyclePhase(""),
-                cycleDay = 0
+                date = date,
+                stepCount = actualSteps,
+                goalAchieved = actualSteps >= stepGoal,
+                dayOfWeek = date.dayOfWeek.name.take(3),
+                cyclePhase = cyclePhase,
+                cycleDay = cycleDay
             )
         }
 
-        // Get current live data from stream
-        val snapshot = HealthDataStreamManager.getCurrentSnapshot()
-
-        // Update today with live data
-        val updatedMonthlyData = monthlyData.map { dayData ->
-            if (dayData.date == today) {
-                dayData.copy(
-                    stepCount = snapshot.cumulativeSteps,
-                    goalAchieved = snapshot.cumulativeSteps >= stepGoal,
-                    cyclePhase = parseCyclePhase(snapshot.cyclePhase),
-                    cycleDay = snapshot.cycleDay
-                )
-            } else {
-                dayData
-            }
-        }
-
-        val totalSteps = updatedMonthlyData.sumOf { it.stepCount }
-        val avgSteps = if (updatedMonthlyData.isNotEmpty()) totalSteps / updatedMonthlyData.size else 0
-        val daysGoalAchieved = updatedMonthlyData.count { it.goalAchieved }
-        val maxSteps = updatedMonthlyData.maxOfOrNull { it.stepCount } ?: stepGoal
-        val bestPhase = calculateBestPerformingPhase(updatedMonthlyData)
+        val totalSteps = monthlyData.sumOf { it.stepCount }
+        val avgSteps = if (monthlyData.isNotEmpty()) totalSteps / monthlyData.size else 0
+        val daysGoalAchieved = monthlyData.count { it.goalAchieved }
+        val maxSteps = monthlyData.maxOfOrNull { it.stepCount } ?: stepGoal
 
         val summary = MonthlyStepSummary(
-            dailyData = updatedMonthlyData,
+            dailyData = monthlyData,
             monthRange = "${startOfMonth.format(DateTimeFormatter.ofPattern("MMM yyyy"))}",
             totalSteps = totalSteps,
             avgSteps = avgSteps,
             daysGoalAchieved = daysGoalAchieved,
             stepGoal = stepGoal,
-            currentSteps = snapshot.cumulativeSteps,
+            currentSteps = currentSteps,
             maxSteps = maxSteps,
-            isEvaluationMode = false,
-            bestPerformingPhase = bestPhase
+            isEvaluationMode = false
         )
 
         _uiState.value = StepAnalyticsUiState.Success(summary)
-    }
-
-
-    private fun calculateBestPerformingPhase(data: List<DailyStepData>): Pair<CyclePhase, Int>? {
-        val validPhases = data.filter { it.cyclePhase != CyclePhase.UNKNOWN }
-
-        if (validPhases.isEmpty()) return null
-
-        val phaseAverages = validPhases.groupBy { it.cyclePhase }
-            .mapValues { (_, days) ->
-                if (days.isNotEmpty()) days.sumOf { it.stepCount } / days.size else 0
-            }
-
-        val bestPhase = phaseAverages.maxByOrNull { it.value }
-
-        return bestPhase?.let { Pair(it.key, it.value) }
     }
 
     private suspend fun getHistoricalCycleInfo(date: LocalDate): Pair<CyclePhase, Int> {
@@ -336,46 +319,30 @@ class StepAnalyticsViewModel(
 
 class StepAnalyticsActivity : ComponentActivity() {
 
-    companion object {
-        private const val TAG = "StepAnalyticsActivity"
-        private const val ACTIVITY_NAME = "StepAnalyticsActivity"
-    }
-
     private val viewModel: StepAnalyticsViewModel by viewModels {
         StepAnalyticsViewModelFactory(
             applicationContext,
-            intent.getIntExtra(IntentExtras.EXTRA_CURRENT_STEPS, -1)  // USE SHARED CONSTANT
+            intent.getIntExtra(StepCountTileService.EXTRA_CURRENT_STEPS, -1)
         )
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Use shared constants instead of StepCountTileService constants
-        val tileSteps = intent.getIntExtra(IntentExtras.EXTRA_CURRENT_STEPS, -1)
-        val launchedFrom = intent.getStringExtra(IntentExtras.EXTRA_LAUNCHED_FROM)
+        // Enhanced logging for tile integration
+        val tileSteps = intent.getIntExtra(StepCountTileService.EXTRA_CURRENT_STEPS, -1)
+        val launchedFrom = intent.getStringExtra(StepCountTileService.EXTRA_LAUNCHED_FROM)
 
-        Log.d(
-            "StepAnalyticsActivity",
-            "Launched - From: $launchedFrom, Tile Steps: $tileSteps, Evaluation: ${EvaluationState.isEvaluationMode.value}"
-        )
+        Log.d("StepAnalyticsActivity", "Launched - From: $launchedFrom, Tile Steps: $tileSteps, Evaluation: ${EvaluationState.isEvaluationMode.value}")
 
         setContent {
             val uiState by viewModel.uiState.collectAsState()
             StepAnalyticsScreen(state = uiState)
         }
     }
-    override fun onDestroy() {
-        super.onDestroy()
-        Log.d(TAG, "onDestroy - StepAnalyticsActivity closing")
-
-        // Unregister from NavigationCoordinator
-        lifecycleScope.launch {
-            NavigationCoordinator.onActivityClosed(ACTIVITY_NAME)
-        }
-    }
 }
 
+// Crash-safe gesture handler wrapper
 @Composable
 fun SafeDragGestureHandler(
     onDragStart: (Offset) -> Unit,
@@ -411,7 +378,8 @@ fun SafeDragGestureHandler(
                 onDrag = { change, dragAmount ->
                     try {
                         val currentTime = System.currentTimeMillis()
-                        if (currentTime - lastUpdate >= 50L) {
+                        // Throttle drag events to prevent crashes from fast scrolling
+                        if (currentTime - lastUpdate >= 50L) { // Minimum 50ms between updates
                             onDrag(change.position, dragAmount)
                             lastUpdate = currentTime
                         }
@@ -426,8 +394,7 @@ fun SafeDragGestureHandler(
         content()
     }
 }
-
-@SuppressLint("StateFlowValueCalledInComposition")
+// Interactive Step Chart Component - Updated with 5-day default and 14-day zoom
 @Composable
 fun InteractiveStepChart(
     data: List<DailyStepData>,
@@ -447,37 +414,32 @@ fun InteractiveStepChart(
     }
 
     val isEvaluationMode by EvaluationState.isEvaluationMode.collectAsState()
-    val snapshot = HealthDataStreamManager.getCurrentSnapshot()
-    val today = if (EvaluationState.isEvaluationMode.value) {
-        EvaluationState.EVALUATION_DATE
-    } else {
-        LocalDate.now()
-    }
+    val today = if (isEvaluationMode) EvaluationState.EVALUATION_DATE else LocalDate.now()
 
-    // Update chart data with live current steps
+    // Update today's data with live steps
+    val liveSteps = SimulationManager.getCumulativeSteps()
     val mergedData = data.map { daily ->
-        if (daily.date == today && snapshot.isHistoricalDataLoaded) {
-            daily.copy(
-                stepCount = snapshot.cumulativeSteps,
-                goalAchieved = snapshot.cumulativeSteps >= stepGoal
-            )
-        } else {
-            daily
-        }
+        if (daily.date == today) {
+            daily.copy(stepCount = liveSteps, goalAchieved = liveSteps >= stepGoal)
+        } else daily
     }
 
-    val chartMax = (stepGoal * 1.67f).toInt().coerceAtLeast(maxSteps)
+    // Calculate chart parameters
+    val chartMax = (stepGoal * 1.67f).toInt().coerceAtLeast(maxSteps) // Show ~67% above goal
     val safeMax = chartMax.toFloat()
 
-    var zoomLevel by remember { mutableIntStateOf(1) }
+    // Zoom state: 1 = 5 days, 2 = 14 days
+    var zoomLevel by remember { mutableIntStateOf(1) } // Start with 5-day view
     var scrollOffset by remember { mutableIntStateOf(0) }
 
+    // Calculate visible data based on zoom and scroll
     val itemsToShow = when (zoomLevel) {
-        1 -> 5
-        2 -> 14
+        1 -> 5 // Default: show 5 days
+        2 -> 14 // Zoom out: show 14 days
         else -> 5
     }
 
+    // Calculate scroll parameters to always show current day as the last item
     val totalDays = mergedData.size
     val maxScrollOffset = if (totalDays > itemsToShow) {
         totalDays - itemsToShow
@@ -485,6 +447,7 @@ fun InteractiveStepChart(
         0
     }
 
+    // Initialize scroll to show current day (last item) by default
     val initialScrollOffset = if (maxScrollOffset > 0) maxScrollOffset else 0
     if (scrollOffset == 0 && maxScrollOffset > 0) {
         scrollOffset = initialScrollOffset
@@ -500,35 +463,28 @@ fun InteractiveStepChart(
         mergedData
     }
 
+    // Drag state for scrolling with crash prevention
     var isDragging by remember { mutableStateOf(false) }
     var dragStartX by remember { mutableFloatStateOf(0f) }
     var dragAccumulation by remember { mutableFloatStateOf(0f) }
     var lastScrollTime by remember { mutableLongStateOf(0L) }
 
     Column(
-        modifier = modifier,
-        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
         Spacer(modifier = Modifier.height(10.dp))
+        // Chart title with zoom indicator and drag state feedback
+        Icon(
+            painter = painterResource(id = R.drawable.steps_icon),
+            contentDescription = "Goal",
+            tint = Color.White,
+            modifier = Modifier.size(12.dp)
+        )
 
-        // Step icon with light blue background
-        Box(
-            modifier = Modifier
-                .size(24.dp)
-                .background(iconBlue, CircleShape),
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(
-                painter = painterResource(id = R.drawable.steps_icon),
-                contentDescription = "Steps",
-                tint = Color.White,
-                modifier = Modifier.size(14.dp)
-            )
-        }
 
-        Spacer(modifier = Modifier.height(12.dp))
 
+        // Main chart canvas with crash-safe gesture handling
         SafeDragGestureHandler(
             onDragStart = { offset ->
                 isDragging = true
@@ -540,30 +496,26 @@ fun InteractiveStepChart(
                 dragAccumulation = 0f
             },
             onDrag = { currentPosition, _ ->
-                if (maxScrollOffset > 0) {
+                if (maxScrollOffset > 0) { // Only allow scrolling when there's more data than visible
                     val currentTime = System.currentTimeMillis()
 
+                    // Throttle scroll events to prevent crashes
                     if (currentTime - lastScrollTime >= 100L) {
                         val currentDragX = currentPosition.x - dragStartX
                         dragAccumulation += currentDragX
 
+                        // Use larger threshold to prevent crash from fast scrolling
                         val scrollThreshold = 40f
 
                         if (abs(dragAccumulation) > scrollThreshold) {
                             try {
-                                // Prevent scrolling past boundaries
                                 if (dragAccumulation > 0 && scrollOffset > 0) {
                                     scrollOffset = (scrollOffset - 1).coerceAtLeast(0)
-                                    dragAccumulation = 0f
-                                    dragStartX = currentPosition.x
                                 } else if (dragAccumulation < 0 && scrollOffset < maxScrollOffset) {
                                     scrollOffset = (scrollOffset + 1).coerceAtMost(maxScrollOffset)
-                                    dragAccumulation = 0f
-                                    dragStartX = currentPosition.x
-                                } else {
-                                    // At boundary - reset accumulation
-                                    dragAccumulation = 0f
                                 }
+                                dragAccumulation = 0f
+                                dragStartX = currentPosition.x
                                 lastScrollTime = currentTime
                             } catch (e: Exception) {
                                 Log.e("InteractiveStepChart", "Error during scroll", e)
@@ -581,11 +533,14 @@ fun InteractiveStepChart(
                         detectTapGestures(
                             onDoubleTap = { _ ->
                                 try {
+                                    // Toggle between 5-day and 14-day views
                                     if (zoomLevel == 1) {
-                                        zoomLevel = 2
+                                        zoomLevel = 2 // Switch to 14-day view
+                                        // Reset to show current day
                                         scrollOffset = if (totalDays > 14) totalDays - 14 else 0
                                     } else {
-                                        zoomLevel = 1
+                                        zoomLevel = 1 // Switch to 5-day view
+                                        // Reset to show current day
                                         scrollOffset = if (totalDays > 5) totalDays - 5 else 0
                                     }
                                 } catch (e: Exception) {
@@ -597,21 +552,24 @@ fun InteractiveStepChart(
             ) {
                 val canvasWidth = size.width
                 val canvasHeight = size.height
-                val chartArea = canvasHeight * 0.85f
+                val chartArea = canvasHeight * 0.85f // Leave space for labels
                 val bottomMargin = canvasHeight * 0.15f
 
                 if (visibleData.isEmpty()) return@Canvas
 
-                val totalSpacing = canvasWidth * 0.4f
-                val totalBarArea = canvasWidth * 0.6f
+                // Calculate bar dimensions with smaller width and bigger spacing
+                val totalSpacing = canvasWidth * 0.4f // Increase spacing to 40% of width
+                val totalBarArea = canvasWidth * 0.6f // Bars take 60% of width
                 val barWidth = totalBarArea / visibleData.size
                 val spacing = totalSpacing / (visibleData.size + 1)
 
+                // Draw Y-axis grid lines and labels
                 val yAxisSteps = 5
                 repeat(yAxisSteps + 1) { i ->
                     val y = chartArea * (1 - i.toFloat() / yAxisSteps)
                     val value = (chartMax * i / yAxisSteps)
 
+                    // Grid line
                     drawLine(
                         color = Color.White.copy(alpha = 0.2f),
                         start = Offset(0f, y),
@@ -619,7 +577,8 @@ fun InteractiveStepChart(
                         strokeWidth = 1.dp.toPx()
                     )
 
-                    if (i < yAxisSteps) {
+                    // Y-axis label
+                    if (i < yAxisSteps) { // Don't draw label at the very top
                         drawContext.canvas.nativeCanvas.apply {
                             drawText(
                                 formatStepNumber(value),
@@ -636,6 +595,7 @@ fun InteractiveStepChart(
                     }
                 }
 
+                // Draw step goal line (solid white)
                 val goalY = chartArea * (1 - stepGoal.toFloat() / safeMax)
                 drawLine(
                     color = Color.White,
@@ -644,6 +604,7 @@ fun InteractiveStepChart(
                     strokeWidth = 2.dp.toPx()
                 )
 
+                // Draw bars
                 visibleData.forEachIndexed { index, dayData ->
                     val ratio = (dayData.stepCount.toFloat() / safeMax).coerceIn(0f, 1f)
                     val barHeight = ratio * chartArea
@@ -651,6 +612,7 @@ fun InteractiveStepChart(
                     val x = spacing + index * (barWidth + spacing)
                     val y = chartArea - barHeight
 
+                    // Bar color based on cycle phase
                     val baseColor = getCycleColor(dayData.cyclePhase)
                     val barColor = if (isEvaluationMode && dayData.date == today) {
                         baseColor.copy(alpha = 1f)
@@ -658,12 +620,14 @@ fun InteractiveStepChart(
                         baseColor.copy(alpha = 0.8f)
                     }
 
+                    // Draw bar
                     drawRect(
                         color = barColor,
                         topLeft = Offset(x, y),
                         size = Size(barWidth, barHeight)
                     )
 
+                    // Goal achievement indicator
                     if (dayData.goalAchieved) {
                         drawRect(
                             color = follicleGreen,
@@ -672,38 +636,38 @@ fun InteractiveStepChart(
                         )
                     }
 
-                    // Highlight most recent day with bold text and background
-                    val isCurrentDay = dayData.date == today
+                    // Current day indicator for evaluation mode
+                    if (isEvaluationMode && dayData.date == today) {
+                        drawRect(
+                            color = Color.Cyan,
+                            topLeft = Offset(x - 1.dp.toPx(), y - 1.dp.toPx()),
+                            size = Size(barWidth + 2.dp.toPx(), barHeight + 2.dp.toPx()),
+                            style = Stroke(width = 2.dp.toPx())
+                        )
+                    }
 
+                    // Cycle day number on horizontal axis
                     drawContext.canvas.nativeCanvas.apply {
-                        // Draw background for current day
-                        if (isCurrentDay) {
-                            val bgPaint = Paint().apply {
-                                color = android.graphics.Color.argb(100, 0, 255, 255)
-                                style = Paint.Style.FILL
-                            }
-                            val textY = canvasHeight - bottomMargin / 2
-                            val textX = x + barWidth / 2
-                            drawCircle(textX, textY, 8.dp.toPx(), bgPaint)
-                        }
-
                         drawText(
                             dayData.cycleDay.toString(),
                             x + barWidth / 2,
                             canvasHeight - bottomMargin / 2,
                             Paint().apply {
-                                color = if (isCurrentDay) {
+                                color = if ( dayData.date == today) {
                                     android.graphics.Color.CYAN
                                 } else {
                                     android.graphics.Color.WHITE
                                 }
                                 textAlign = Paint.Align.CENTER
                                 textSize = 9.sp.toPx()
-                                isFakeBoldText = isCurrentDay
+                                if (dayData.date == today) {
+                                    isFakeBoldText = true
+                                }
                             }
                         )
                     }
 
+                    // Show step counts on bars if in 14-day view and bars are tall enough
                     if (zoomLevel == 2 && barHeight > 20.dp.toPx()) {
                         drawContext.canvas.nativeCanvas.apply {
                             drawText(
@@ -713,7 +677,7 @@ fun InteractiveStepChart(
                                 Paint().apply {
                                     color = android.graphics.Color.WHITE
                                     textAlign = Paint.Align.CENTER
-                                    textSize = 7.sp.toPx()
+                                    textSize = 7.sp.toPx() // Smaller text for 14-day view
                                     isFakeBoldText = true
                                     setShadowLayer(2f, 1f, 1f, android.graphics.Color.BLACK)
                                 }
@@ -722,6 +686,8 @@ fun InteractiveStepChart(
                     }
                 }
 
+
+                // Draw drag overlay when actively dragging
                 if (isDragging && maxScrollOffset > 0) {
                     drawRect(
                         color = Color.White.copy(alpha = 0.1f),
@@ -733,6 +699,7 @@ fun InteractiveStepChart(
         }
     }
 
+    // Axis labels with icons - centered
     Box(
         modifier = Modifier.fillMaxWidth(),
         contentAlignment = Alignment.Center
@@ -741,6 +708,7 @@ fun InteractiveStepChart(
             horizontalArrangement = Arrangement.Center,
             verticalAlignment = Alignment.CenterVertically
         ) {
+            // Current cycle day with cycle icon
             val currentDay = visibleData.lastOrNull {
                 it.date == today
             } ?: visibleData.lastOrNull()
@@ -765,8 +733,7 @@ fun InteractiveStepChart(
                 }
             }
 
-            Spacer(modifier = Modifier.width(8.dp))
-
+            // Goal with steps icon
             Row(
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -788,6 +755,8 @@ fun InteractiveStepChart(
     }
 }
 
+
+// Helper function to format step numbers
 private fun formatStepNumber(steps: Int): String {
     return when {
         steps >= 10000 -> "${steps / 1000}K"
@@ -796,11 +765,14 @@ private fun formatStepNumber(steps: Int): String {
     }
 }
 
+// Updated StepAnalyticsScreen to use the new interactive chart
+// Updated StepAnalyticsScreen with swipe navigation
 @Composable
 fun StepAnalyticsScreen(state: StepAnalyticsUiState) {
-    var currentPage by remember { mutableIntStateOf(0) }
+    var currentPage by remember { mutableIntStateOf(0) } // 0 = Chart, 1 = Summary
     val pagerState = rememberPagerState(pageCount = { 2 })
 
+    // Sync pager state with current page
     LaunchedEffect(pagerState.currentPage) {
         currentPage = pagerState.currentPage
     }
@@ -820,7 +792,7 @@ fun StepAnalyticsScreen(state: StepAnalyticsUiState) {
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "Loading step data...",
+                        text = if (EvaluationState.isEvaluationMode.collectAsState().value) "Loading evaluation data..." else "Loading step data...",
                         color = WhiteText.copy(alpha = 0.7f),
                         fontSize = 10.sp
                     )
@@ -865,6 +837,7 @@ fun StepAnalyticsScreen(state: StepAnalyticsUiState) {
                 ) { page ->
                     when (page) {
                         0 -> {
+                            // Chart Page
                             Column(
                                 modifier = Modifier
                                     .fillMaxSize()
@@ -872,6 +845,18 @@ fun StepAnalyticsScreen(state: StepAnalyticsUiState) {
                                 horizontalAlignment = Alignment.CenterHorizontally,
                                 verticalArrangement = Arrangement.Center
                             ) {
+                                // Header with evaluation mode indicator
+                                val isEvaluationMode = state.monthlyData.isEvaluationMode
+                                if (isEvaluationMode && !state.monthlyData.evaluationDataIntegrity) {
+                                    Text(
+                                        text = "Data integrity issue detected",
+                                        color = menstrualRed,
+                                        fontSize = 7.sp
+                                    )
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                }
+
+                                // Interactive Bar Chart
                                 InteractiveStepChart(
                                     data = state.monthlyData.dailyData,
                                     stepGoal = state.monthlyData.stepGoal,
@@ -879,6 +864,7 @@ fun StepAnalyticsScreen(state: StepAnalyticsUiState) {
                                     modifier = Modifier.weight(1f)
                                 )
 
+                                // Swipe indicator
                                 Row(
                                     modifier = Modifier.padding(8.dp),
                                     verticalAlignment = Alignment.CenterVertically
@@ -898,11 +884,13 @@ fun StepAnalyticsScreen(state: StepAnalyticsUiState) {
                             }
                         }
                         1 -> {
+                            // Summary Page
                             SummaryPage(summary = state.monthlyData)
                         }
                     }
                 }
 
+                // Page indicator
                 Row(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
@@ -936,6 +924,7 @@ fun SummaryPage(summary: MonthlyStepSummary) {
             .padding(12.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
+        // Header
         Text(
             text = "Summary",
             color = WhiteText,
@@ -945,30 +934,54 @@ fun SummaryPage(summary: MonthlyStepSummary) {
 
         Spacer(modifier = Modifier.height(8.dp))
 
+        // Scrollable content
         LazyColumn(
             modifier = Modifier.fillMaxWidth(),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
+            // Evaluation mode header
+            if (summary.isEvaluationMode) {
+                item {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            text = "EVALUATION DATA",
+                            color = ovulationPink,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        if (!summary.evaluationDataIntegrity) {
+                            Text(
+                                text = "Warning: Data integrity issues detected",
+                                color = menstrualRed,
+                                fontSize = 9.sp
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Main statistics
             item {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(12.dp),
-                    onClick = { }
+                    onClick = { /* Handle click if needed */ } ,
                 ) {
                     Column(
                         modifier = Modifier.padding(16.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
+                        // Period range
                         Text(
                             text = summary.monthRange,
                             color = WhiteText,
                             fontSize = 12.sp,
-                            fontWeight = FontWeight.Medium,
-                            textAlign = TextAlign.Center
+                            fontWeight = FontWeight.Medium
                         )
 
+                        // Main stats grid
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
@@ -982,7 +995,7 @@ fun SummaryPage(summary: MonthlyStepSummary) {
                                 SummaryStatItem(
                                     label = "Daily Average",
                                     value = formatLargeNumber(summary.avgSteps),
-                                    color = CyanHZ
+                                    color = if (summary.isEvaluationMode) ovulationPink else CyanHZ
                                 )
                             }
 
@@ -997,7 +1010,7 @@ fun SummaryPage(summary: MonthlyStepSummary) {
                                         follicleGreen else lutealPurple
                                 )
                                 SummaryStatItem(
-                                    label = "Current Steps",
+                                    label = if (summary.isEvaluationMode) "Current Steps" else "Today's Steps",
                                     value = formatLargeNumber(summary.currentSteps),
                                     color = if (summary.currentSteps >= summary.stepGoal) follicleGreen else WhiteText
                                 )
@@ -1007,11 +1020,13 @@ fun SummaryPage(summary: MonthlyStepSummary) {
                 }
             }
 
+            // Goal information
             item {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(12.dp),
-                    onClick = { }
+                    onClick = { /* Handle click if needed */ } ,
+
                 ) {
                     Row(
                         modifier = Modifier
@@ -1044,11 +1059,11 @@ fun SummaryPage(summary: MonthlyStepSummary) {
                 }
             }
 
+            // Cycle phase legend
             item {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(12.dp),
-                    onClick = { }
+                    shape = RoundedCornerShape(12.dp),onClick = { /* Handle click if needed */ } ,
                 ) {
                     Column(
                         modifier = Modifier.padding(12.dp),
@@ -1058,33 +1073,34 @@ fun SummaryPage(summary: MonthlyStepSummary) {
                             text = "Cycle Phases",
                             color = WhiteText,
                             fontSize = 11.sp,
-                            fontWeight = FontWeight.Medium,
-                            textAlign = TextAlign.Center
+                            fontWeight = FontWeight.Medium
                         )
                         Spacer(modifier = Modifier.height(8.dp))
 
-                        Column(
-                            verticalArrangement = Arrangement.spacedBy(6.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
-                            CyclePhase.entries.filter { it != CyclePhase.UNKNOWN }.forEach { phase ->
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            CyclePhase.entries.filter { it != CyclePhase.UNKNOWN }.chunked(2).forEach { phaseRow ->
                                 Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.Center,
-                                    modifier = Modifier.fillMaxWidth()
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceEvenly
                                 ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(12.dp)
-                                            .background(getCycleColor(phase), RoundedCornerShape(3.dp))
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text(
-                                        text = phase.name.lowercase().replaceFirstChar { it.uppercase() },
-                                        color = WhiteText.copy(alpha = 0.8f),
-                                        fontSize = 9.sp,
-                                        textAlign = TextAlign.Center
-                                    )
+                                    phaseRow.forEach { phase ->
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            modifier = Modifier.weight(1f)
+                                        ) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(12.dp)
+                                                    .background(getCycleColor(phase), RoundedCornerShape(3.dp))
+                                            )
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text(
+                                                text = phase.name.lowercase().replaceFirstChar { it.uppercase() },
+                                                color = WhiteText.copy(alpha = 0.8f),
+                                                fontSize = 9.sp
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1092,100 +1108,46 @@ fun SummaryPage(summary: MonthlyStepSummary) {
                 }
             }
 
+            // Performance insights
             item {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(12.dp),
-                    onClick = { }
+                    onClick = { /* Handle click if needed */ } ,
                 ) {
                     Column(
                         modifier = Modifier.padding(12.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                        horizontalAlignment = Alignment.CenterHorizontally
                     ) {
                         Text(
                             text = "Performance",
                             color = WhiteText,
                             fontSize = 11.sp,
-                            fontWeight = FontWeight.Medium,
-                            textAlign = TextAlign.Center
+                            fontWeight = FontWeight.Medium
                         )
+                        Spacer(modifier = Modifier.height(8.dp))
 
                         val goalPercentage = ((summary.daysGoalAchieved.toFloat() / summary.dailyData.size) * 100).toInt()
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = "Goal Success Rate:",
-                                color = WhiteText.copy(alpha = 0.8f),
-                                fontSize = 9.sp
-                            )
-                            Text(
-                                text = "$goalPercentage%",
-                                color = if (goalPercentage >= 70) follicleGreen
-                                else if (goalPercentage >= 50) lutealPurple
-                                else menstrualRed,
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
+                        Text(
+                            text = "$goalPercentage% goal achievement rate",
+                            color = if (goalPercentage >= 70) follicleGreen else if (goalPercentage >= 50) lutealPurple else menstrualRed,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Medium
+                        )
 
                         val bestDay = summary.dailyData.maxByOrNull { it.stepCount }
                         if (bestDay != null) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = "Best Day:",
-                                    color = WhiteText.copy(alpha = 0.8f),
-                                    fontSize = 9.sp
-                                )
-                                Text(
-                                    text = formatLargeNumber(bestDay.stepCount),
-                                    color = follicleGreen,
-                                    fontSize = 10.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-                        }
-
-                        summary.bestPerformingPhase?.let { (phase, avgSteps) ->
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = "Best Phase:",
-                                    color = WhiteText.copy(alpha = 0.8f),
-                                    fontSize = 9.sp
-                                )
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(
-                                        text = phase.name.lowercase().replaceFirstChar { it.uppercase() },
-                                        color = getCycleColor(phase),
-                                        fontSize = 9.sp,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text(
-                                        text = "(${formatLargeNumber(avgSteps)})",
-                                        color = WhiteText.copy(alpha = 0.7f),
-                                        fontSize = 8.sp
-                                    )
-                                }
-                            }
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "Best day: ${formatLargeNumber(bestDay.stepCount)} steps",
+                                color = WhiteText.copy(alpha = 0.7f),
+                                fontSize = 9.sp
+                            )
                         }
                     }
                 }
             }
 
+            // Back navigation hint
             item {
                 Text(
                     text = "Swipe right to return to chart",
@@ -1205,16 +1167,13 @@ fun SummaryStatItem(label: String, value: String, color: Color) {
             text = value,
             color = color,
             fontSize = 16.sp,
-            fontWeight = FontWeight.Bold,
-            textAlign = TextAlign.Center,
-            maxLines = 1
+            fontWeight = FontWeight.Bold
         )
         Text(
             text = label,
             color = WhiteText.copy(alpha = 0.7f),
             fontSize = 9.sp,
-            textAlign = TextAlign.Center,
-            maxLines = 1
+            textAlign = TextAlign.Center
         )
     }
 }
@@ -1269,7 +1228,7 @@ fun InteractiveStepAnalyticsPreview() {
 
     val sampleSummary = MonthlyStepSummary(
         dailyData = sampleData,
-        monthRange = "Aug 2023",
+        monthRange = "Aug 2023 (Evaluation)",
         totalSteps = sampleData.sumOf { it.stepCount },
         avgSteps = sampleData.sumOf { it.stepCount } / sampleData.size,
         daysGoalAchieved = sampleData.count { it.goalAchieved },
@@ -1277,8 +1236,7 @@ fun InteractiveStepAnalyticsPreview() {
         currentSteps = 8432,
         maxSteps = sampleData.maxOfOrNull { it.stepCount } ?: 10000,
         isEvaluationMode = true,
-        evaluationDataIntegrity = true,
-        bestPerformingPhase = Pair(CyclePhase.FOLLICULAR, 12500)
+        evaluationDataIntegrity = true
     )
 
     StepAnalyticsScreen(state = StepAnalyticsUiState.Success(sampleSummary))

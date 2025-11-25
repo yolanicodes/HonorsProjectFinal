@@ -17,8 +17,6 @@ import androidx.wear.tiles.TileBuilders
 import androidx.wear.tooling.preview.devices.WearDevices
 import com.example.honoursproject.CyclePhase
 import com.example.honoursproject.R
-import com.example.honoursproject.dataservices.HealthDataStreamManager
-import com.example.honoursproject.dataservices.IntentExtras
 import com.example.honoursproject.dataservices.SimulationManager
 import com.example.honoursproject.dataservices.WorkoutDetails
 import com.example.honoursproject.dataservices.WorkoutSimulationManager
@@ -115,9 +113,11 @@ class MainTileService : SuspendingTileService() {
 
     override fun onCreate() {
         super.onCreate()
+       //WorkoutSimulationManager.startMonitoring(this, "P102-Workout_Data.csv")
+
         dataCollectionJob = serviceScope.launch {
             launch {
-                HealthDataStreamManager.dataStream.collect {
+                SimulationManager.healthDataStream.collect {
                     getUpdater(this@MainTileService).requestUpdate(MainTileService::class.java)
                 }
             }
@@ -135,13 +135,16 @@ class MainTileService : SuspendingTileService() {
     }
 
     private fun getMenstrualCycleInfo(): MenstrualCycleInfo {
-        val snapshot = HealthDataStreamManager.getCurrentSnapshot()
+        val healthData = SimulationManager.healthDataStream.value
         val cyclePhase = try {
-            CyclePhase.valueOf(snapshot.cyclePhase.uppercase())
+            CyclePhase.valueOf(healthData.cyclePhase.uppercase())
         } catch (e: Exception) {
             CyclePhase.UNKNOWN
         }
-        return MenstrualCycleInfo(phase = cyclePhase, dayOfCycle = snapshot.cycleDay)
+        return MenstrualCycleInfo(
+            phase = cyclePhase,
+            dayOfCycle = healthData.cycleDay
+        )
     }
 }
 private fun noWorkoutLayout(
@@ -214,17 +217,15 @@ private fun workoutTileLayout(
                             .setClassName(WorkoutActivity::class.java.name)
                             .setPackageName(context.packageName)
                             .addKeyToExtraMapping(
-                                IntentExtras.EXTRA_WORKOUT_TYPE,  // FIXED: Use IntentExtras
-                                ActionBuilders.AndroidStringExtra.Builder()
-                                    .setValue(workout.workoutType).build()
+                                "workout_type",
+                                ActionBuilders.AndroidStringExtra.Builder().setValue(workout.workoutType).build()
                             )
                             .addKeyToExtraMapping(
-                                IntentExtras.EXTRA_WORKOUT_START_TIME,  // FIXED: Use IntentExtras
-                                ActionBuilders.AndroidStringExtra.Builder()
-                                    .setValue(workout.startTime.toString()).build()
+                                "workout_start_time",
+                                ActionBuilders.AndroidStringExtra.Builder().setValue(workout.startTime.toString()).build()
                             )
                             .addKeyToExtraMapping(
-                                IntentExtras.EXTRA_WORKOUT_DURATION,  // FIXED: Use IntentExtras
+                                "workout_duration",
                                 ActionBuilders.AndroidIntExtra.Builder()
                                     .setValue(workout.duration.toInt())
                                     .build()
