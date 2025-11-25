@@ -1,11 +1,13 @@
 package com.example.honoursproject.presentation
 
 import android.Manifest
+import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -33,14 +35,18 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.wear.compose.material.*
+import androidx.wear.compose.navigation.SwipeDismissableNavHost
+import androidx.wear.compose.navigation.composable
+import androidx.wear.compose.navigation.rememberSwipeDismissableNavController
 import com.example.honoursproject.dataservices.DataStreamService
 import com.example.honoursproject.R
 import com.example.honoursproject.dataservices.EvaluationState
+import com.example.honoursproject.dataservices.HealthDataStreamManager
 import com.example.honoursproject.dataservices.SimulationCoordinator
 import com.example.honoursproject.dataservices.SimulationManager
-import com.example.honoursproject.dataservices.WorkoutSimulationManager
 import com.example.honoursproject.presentation.theme.HonoursProjectTheme
 import com.example.honoursproject.presentation.theme.backgroundBlue
+import com.example.honoursproject.presentation.theme.follicleGreen
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -57,23 +63,33 @@ object SetupPreferences {
     val STEP_GOAL = intPreferencesKey("selected_step_goal")
 }
 
-// --- Enhanced ViewModel with SimulationCoordinator integration ---
+// --- Enhanced Navigation Routes ---
+object NavigationRoutes {
+    const val AGE_PICKER = "age_picker"
+    const val STEP_GOAL_PICKER = "step_goal_picker"
+    const val START_SIMULATION = "start_simulation"
+    const val LOADING_HISTORICAL = "loading_historical"
+    const val SIMULATION_RUNNING = "simulation_running"
+    const val SIMULATION_STOPPED = "simulation_stopped"
+    const val EDIT_STEP_GOAL = "edit_step_goal"
+}
+
+// --- Enhanced ViewModel with Loading State Management ---
 class MainViewModel(private val activity: ComponentActivity) : ViewModel() {
 
-    enum class SetupScreen {
-        AgePicker,
-        StepGoalPicker,
-        SimulationRunning,
-        StartSimulation,
-        SimulationPaused,
-        SimulationStopped
-    }
+    // Loading states
+    private val _historicalLoadingProgress = MutableStateFlow(0f)
+    val historicalLoadingProgress: StateFlow<Float> = _historicalLoadingProgress.asStateFlow()
 
-    private val _isLoading = MutableStateFlow(true)
-    val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
+    private val _historicalLoadingStatus = MutableStateFlow("")
+    val historicalLoadingStatus: StateFlow<String> = _historicalLoadingStatus.asStateFlow()
 
-    private val _currentScreen = MutableStateFlow(SetupScreen.AgePicker)
-    val currentScreen: StateFlow<SetupScreen> = _currentScreen.asStateFlow()
+    private val _isHistoricalLoadingComplete = MutableStateFlow(false)
+    val isHistoricalLoadingComplete: StateFlow<Boolean> = _isHistoricalLoadingComplete.asStateFlow()
+
+    // Setup states
+    private val _isSetupComplete = MutableStateFlow(false)
+    val isSetupComplete: StateFlow<Boolean> = _isSetupComplete.asStateFlow()
 
     private val _selectedAge = MutableStateFlow(25)
     val selectedAge: StateFlow<Int> = _selectedAge.asStateFlow()
@@ -84,20 +100,13 @@ class MainViewModel(private val activity: ComponentActivity) : ViewModel() {
     private val _isEvaluationMode = MutableStateFlow(false)
     val isEvaluationMode: StateFlow<Boolean> = _isEvaluationMode.asStateFlow()
 
+    // Simulation states
     private val _isSimulationRunning = MutableStateFlow(false)
     val isSimulationRunning: StateFlow<Boolean> = _isSimulationRunning.asStateFlow()
 
     private val _isPaused = MutableStateFlow(false)
     val isPaused: StateFlow<Boolean> = _isPaused.asStateFlow()
 
-    private val _isSimulationComplete = MutableStateFlow(false)
-    val isSimulationComplete: StateFlow<Boolean> = _isSimulationComplete.asStateFlow()
-    private val _evaluationLoadingStatus = MutableStateFlow("")
-    val evaluationLoadingStatus: StateFlow<String> = _evaluationLoadingStatus.asStateFlow()
-
-    private val _isStartingUp = MutableStateFlow(false)
-    val isStartingUp: StateFlow<Boolean> = _isStartingUp.asStateFlow()
-    // Enhanced state tracking with SimulationCoordinator
     private val _simulationProgress = MutableStateFlow(0f)
     val simulationProgress: StateFlow<Float> = _simulationProgress.asStateFlow()
 
@@ -106,17 +115,21 @@ class MainViewModel(private val activity: ComponentActivity) : ViewModel() {
 
     init {
         viewModelScope.launch {
-            activity.setupDataStore.data.firstOrNull()?.let { prefs ->
-                if (prefs[SetupPreferences.IS_COMPLETE] == true) {
-                    _selectedAge.value = prefs[SetupPreferences.AGE] ?: 25
-                    _selectedStepGoal.value = prefs[SetupPreferences.STEP_GOAL] ?: 10000
-                    _currentScreen.value = SetupScreen.StartSimulation
-                }
-            }
-            _isLoading.value = false
-
-            // Start monitoring simulation state changes
+            loadUserPreferences()
             startSimulationStateMonitoring()
+            startHistoricalLoadingMonitoring()
+        }
+    }
+
+    private suspend fun loadUserPreferences() {
+        activity.setupDataStore.data.firstOrNull()?.let { prefs ->
+            val isComplete = prefs[SetupPreferences.IS_COMPLETE] ?: false
+            _isSetupComplete.value = isComplete
+
+            if (isComplete) {
+                _selectedAge.value = prefs[SetupPreferences.AGE] ?: 25
+                _selectedStepGoal.value = prefs[SetupPreferences.STEP_GOAL] ?: 10000
+            }
         }
     }
 
@@ -126,52 +139,89 @@ class MainViewModel(private val activity: ComponentActivity) : ViewModel() {
     private fun startSimulationStateMonitoring() {
         viewModelScope.launch {
             SimulationCoordinator.combinedSimulationState.collect { combinedState ->
-                // Update local state based on combined simulation state
                 _isSimulationRunning.value = combinedState.isHealthRunning
                 _isPaused.value = combinedState.isHealthPaused
                 _simulationProgress.value = combinedState.overallProgress
 
-                // Update synchronization status
                 _synchronizationStatus.value = if (combinedState.isSynchronized) {
                     "Synchronized"
                 } else {
                     SimulationCoordinator.getSynchronizationStatusMessage()
                 }
 
-                // Update screen based on simulation state
-                if (combinedState.isHealthRunning) {
-                    if (combinedState.isHealthPaused) {
-                        _currentScreen.value = SetupScreen.SimulationPaused
-                    } else {
-                        _currentScreen.value = SetupScreen.SimulationRunning
-                    }
-                } else if (_isSimulationRunning.value) {
-                    // Was running but now stopped
-                    _currentScreen.value = SetupScreen.SimulationStopped
-                }
-
-                Log.d("MainViewModel", "Simulation state updated: Running=${combinedState.isHealthRunning}, " +
-                        "Paused=${combinedState.isHealthPaused}, Progress=${combinedState.overallProgress}%, " +
-                        "Synchronized=${combinedState.isSynchronized}")
+                Log.d("MainViewModel", "Simulation state: Running=${combinedState.isHealthRunning}, " +
+                        "Paused=${combinedState.isHealthPaused}, Progress=${combinedState.overallProgress}%")
             }
         }
     }
 
+    /**
+     * Monitor historical data loading progress
+     */
+    private fun startHistoricalLoadingMonitoring() {
+        viewModelScope.launch {
+            // Monitor loading progress
+            launch {
+                SimulationManager.historicalLoadingProgress.collect { progress ->
+                    _historicalLoadingProgress.value = progress
+
+                    _historicalLoadingStatus.value = when {
+                        progress < 0.1f -> "Initializing historical data..."
+                        progress < 0.5f -> "Loading historical data (${(progress * 100).toInt()}%)..."
+                        progress < 0.9f -> "Processing historical records..."
+                        progress < 1.0f -> "Finalizing data load..."
+                        else -> "Verifying data accessibility..."
+                    }
+                }
+            }
+
+            // NEW: Monitor data accessibility
+            launch {
+                SimulationManager.isDataAccessible.collect { isAccessible ->
+                    if (isAccessible) {
+                        _historicalLoadingStatus.value = "✓ Ready to simulate"
+                    }
+                }
+            }
+
+            // Monitor completion
+            launch {
+                SimulationManager.isHistoricalLoadingComplete.collect { isComplete ->
+                    _isHistoricalLoadingComplete.value = isComplete
+                }
+            }
+        }
+    }
+
+    // User interaction functions
     fun onAgeSelected(age: Int) {
         _selectedAge.value = age
     }
 
     fun onStepGoalSelected(goal: Int) {
         _selectedStepGoal.value = goal
+        viewModelScope.launch {
+            saveStepGoal(goal)
+        }
     }
 
-    fun proceedToStepGoal() {
-        _currentScreen.value = SetupScreen.StepGoalPicker
+    private suspend fun saveStepGoal(goal: Int) {
+        activity.setupDataStore.edit { prefs ->
+            prefs[SetupPreferences.STEP_GOAL] = goal
+        }
     }
 
-    /**
-     * Enhanced evaluation mode toggle with proper state management
-     */
+    fun saveSetupPreferences() {
+        viewModelScope.launch {
+            activity.setupDataStore.edit { prefs ->
+                prefs[SetupPreferences.AGE] = _selectedAge.value
+                prefs[SetupPreferences.STEP_GOAL] = _selectedStepGoal.value
+                prefs[SetupPreferences.IS_COMPLETE] = true
+            }
+            _isSetupComplete.value = true
+        }
+    }
+
     fun onToggleEvaluationMode(isEvaluation: Boolean) {
         _isEvaluationMode.value = isEvaluation
         if (isEvaluation) {
@@ -183,65 +233,28 @@ class MainViewModel(private val activity: ComponentActivity) : ViewModel() {
         }
     }
 
-    fun proceedToStartSimulation() {
-        viewModelScope.launch {
-            activity.setupDataStore.edit { prefs ->
-                prefs[SetupPreferences.AGE] = _selectedAge.value
-                prefs[SetupPreferences.STEP_GOAL] = _selectedStepGoal.value
-                prefs[SetupPreferences.IS_COMPLETE] = true
-            }
-        }
-        _currentScreen.value = SetupScreen.StartSimulation
-    }
-
     /**
-     * Enhanced simulation start with coordinated services
+     * Start simulation and initialize loading state
      */
     fun startSimulation() {
         Log.i("MainViewModel", "Starting simulation - Evaluation mode: ${_isEvaluationMode.value}")
 
-        _isStartingUp.value = true
+        // Reset loading states
+        _historicalLoadingProgress.value = 0f
+        _historicalLoadingStatus.value = "Initializing..."
+        _isHistoricalLoadingComplete.value = false
 
-        // Ensure evaluation state is properly set before starting
+        // Set evaluation mode
         if (_isEvaluationMode.value) {
             EvaluationState.startEvaluationMode()
-            _evaluationLoadingStatus.value = "Activating evaluation mode..."
-            Log.i("MainViewModel", "Evaluation mode activated for simulation")
         } else {
             EvaluationState.stopEvaluationMode()
-            _evaluationLoadingStatus.value = "Starting simulation..."
-            Log.i("MainViewModel", "Normal mode activated for simulation")
         }
 
-        // Use SimulationCoordinator to start all services
+        // Start coordinated simulation
         SimulationCoordinator.startSimulation(activity)
-
-        // Monitor startup progress
-        viewModelScope.launch {
-            delay(2000) // Give services time to start
-
-            if (_isEvaluationMode.value) {
-                _evaluationLoadingStatus.value = "Loading historical data (Aug 2023)..."
-                delay(3000) // Extra time for historical data loading
-                _evaluationLoadingStatus.value = "Initializing evaluation timeline..."
-            } else {
-                _evaluationLoadingStatus.value = "Initializing simulation..."
-            }
-
-            delay(2000)
-            _evaluationLoadingStatus.value = "Ready"
-            _isStartingUp.value = false
-        }
-
-        // State will be updated automatically through the monitoring flow
-        Log.i("MainViewModel", "Simulation start command sent")
     }
 
-
-
-    /**
-     * Enhanced pause/resume with SimulationCoordinator
-     */
     fun togglePauseResume() {
         if (SimulationCoordinator.canPause() && !_isPaused.value) {
             Log.i("MainViewModel", "Pausing simulation")
@@ -252,52 +265,31 @@ class MainViewModel(private val activity: ComponentActivity) : ViewModel() {
         }
     }
 
-    /**
-     * Enhanced stop with proper cleanup
-     */
     fun stopSimulation() {
         Log.i("MainViewModel", "Stopping simulation")
         SimulationCoordinator.stopSimulation(activity)
-
-        // Reset evaluation mode when stopping
         EvaluationState.stopEvaluationMode()
         _isEvaluationMode.value = false
     }
 
-    /**
-     * Reset simulation to initial state
-     */
-    fun resetSimulation() {
+    suspend fun resetSimulation() {
         Log.i("MainViewModel", "Resetting simulation")
         SimulationCoordinator.resetSimulation(activity)
-
-        // Reset evaluation mode
         EvaluationState.stopEvaluationMode()
         _isEvaluationMode.value = false
     }
 
-    /**
-     * Restart from setup screen
-     */
-    fun restartFromSetup() {
-        _currentScreen.value = SetupScreen.StartSimulation
-        _isEvaluationMode.value = false
-        EvaluationState.stopEvaluationMode()
-    }
-
-    /**
-     * Get current simulation status message
-     */
     fun getSimulationStatusMessage(): String {
         return when {
-            _isPaused.value -> "Simulation Paused (${_simulationProgress.value.toInt()}%)"
-            _isSimulationRunning.value -> "Simulation Running (${_simulationProgress.value.toInt()}%)"
-            SimulationCoordinator.isStopped() -> "Simulation Stopped"
-            else -> "Ready to Start"
+            _isPaused.value -> "Paused (${_simulationProgress.value.toInt()}%)"
+            _isSimulationRunning.value -> "Running (${_simulationProgress.value.toInt()}%)"
+            SimulationCoordinator.isStopped() -> "Stopped"
+            else -> "Ready"
         }
     }
 }
 
+// --- MainActivity ---
 class MainActivity : ComponentActivity() {
     private val viewModel: MainViewModel by viewModels {
         object : ViewModelProvider.Factory {
@@ -313,7 +305,6 @@ class MainActivity : ComponentActivity() {
                 viewModel.startSimulation()
             } else {
                 Log.w("MainActivity", "Notification permission denied")
-                // Still try to start the simulation even without notification permission
                 viewModel.startSimulation()
             }
         }
@@ -325,16 +316,35 @@ class MainActivity : ComponentActivity() {
                     Manifest.permission.POST_NOTIFICATIONS
                 ) == PackageManager.PERMISSION_GRANTED
             ) {
-                // Permission is already granted, start the simulation
-                viewModel.startSimulation()
+                checkFullScreenIntentPermission()
             } else {
-                // Permission not granted, request it from the user
                 requestPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
             }
         } else {
-            // For older Android versions, no runtime permission is needed
-            viewModel.startSimulation()
+            checkFullScreenIntentPermission()
         }
+    }
+
+    private fun checkFullScreenIntentPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) { // Android 14+
+            val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+
+            if (!notificationManager.canUseFullScreenIntent()) {
+                Log.w("MainActivity", "Full screen intent permission not granted")
+                // Request permission via settings
+                try {
+                    val intent = Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT).apply {
+                        data = android.net.Uri.parse("package:$packageName")
+                    }
+                    startActivity(intent)
+                } catch (e: Exception) {
+                    Log.e("MainActivity", "Could not open full screen intent settings", e)
+                }
+            }
+        }
+
+        // Start simulation regardless (fallback mechanisms exist)
+        viewModel.startSimulation()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -343,107 +353,146 @@ class MainActivity : ComponentActivity() {
         setTheme(android.R.style.Theme_DeviceDefault)
 
         setContent {
-            val currentScreen by viewModel.currentScreen.collectAsState()
-            val selectedAge by viewModel.selectedAge.collectAsState()
-            val selectedStepGoal by viewModel.selectedStepGoal.collectAsState()
-            val isEvaluationMode by viewModel.isEvaluationMode.collectAsState()
-            val isPaused by viewModel.isPaused.collectAsState()
-            val isRunning by viewModel.isSimulationRunning.collectAsState()
-            val simulationProgress by viewModel.simulationProgress.collectAsState()
-            val synchronizationStatus by viewModel.synchronizationStatus.collectAsState()
-            val evaluationLoadingStatus by viewModel.evaluationLoadingStatus.collectAsState()  // Add this
-            val isStartingUp by viewModel.isStartingUp.collectAsState()
             WearApp(
-                currentScreen = currentScreen,
-                selectedAge = selectedAge,
-                selectedStepGoal = selectedStepGoal,
-                isEvaluationMode = isEvaluationMode,
-                isPaused = isPaused,
-                isRunning = isRunning,
-                simulationProgress = simulationProgress,
-                synchronizationStatus = synchronizationStatus,
-                onAgeChange = { viewModel.onAgeSelected(it) },
-                onStepGoalChange = { viewModel.onStepGoalSelected(it) },
-                onAgeConfirmed = { viewModel.proceedToStepGoal() },
-                onStepGoalConfirmed = { viewModel.proceedToStartSimulation() },
-                onStartSimulation = { startSimulationWithPermissionCheck() },
-                onToggleEvaluation = { viewModel.onToggleEvaluationMode(it) },
-                onTogglePauseResume = { viewModel.togglePauseResume() },
-                onStopSimulation = { viewModel.stopSimulation() },
-                onRestartFromSetup = { viewModel.restartFromSetup() },
-                statusMessage = viewModel.getSimulationStatusMessage(),
-                evaluationLoadingStatus =evaluationLoadingStatus,
-                isStartingUp = isStartingUp
+                viewModel = viewModel,
+                onStartSimulation = { startSimulationWithPermissionCheck() }
             )
         }
     }
 }
 
+// --- Main Composable with Navigation ---
 @Composable
 fun WearApp(
-    currentScreen: MainViewModel.SetupScreen,
-    selectedAge: Int,
-    selectedStepGoal: Int,
-    isEvaluationMode: Boolean,
-    isPaused: Boolean,
-    isRunning: Boolean,
-    simulationProgress: Float,
-    synchronizationStatus: String,
-    statusMessage: String,
-    onAgeChange: (Int) -> Unit,
-    onStepGoalChange: (Int) -> Unit,
-    onAgeConfirmed: () -> Unit,
-    onStepGoalConfirmed: () -> Unit,
-    onStartSimulation: () -> Unit,
-    onToggleEvaluation: (Boolean) -> Unit,
-    onTogglePauseResume: () -> Unit,
-    onStopSimulation: () -> Unit,
-    onRestartFromSetup: () -> Unit,
-    evaluationLoadingStatus: String,  // Add this
-    isStartingUp: Boolean,
+    viewModel: MainViewModel,
+    onStartSimulation: () -> Unit
 ) {
+    val navController = rememberSwipeDismissableNavController()
+    val coroutineScope = rememberCoroutineScope()
+
+    val isSetupComplete by viewModel.isSetupComplete.collectAsState()
+
+    // Collect states
+    val selectedAge by viewModel.selectedAge.collectAsState()
+    val selectedStepGoal by viewModel.selectedStepGoal.collectAsState()
+    val isEvaluationMode by viewModel.isEvaluationMode.collectAsState()
+    val isPaused by viewModel.isPaused.collectAsState()
+    val isRunning by viewModel.isSimulationRunning.collectAsState()
+    val simulationProgress by viewModel.simulationProgress.collectAsState()
+    val synchronizationStatus by viewModel.synchronizationStatus.collectAsState()
+    val historicalLoadingProgress by viewModel.historicalLoadingProgress.collectAsState()
+    val historicalLoadingStatus by viewModel.historicalLoadingStatus.collectAsState()
+    val isHistoricalLoadingComplete by viewModel.isHistoricalLoadingComplete.collectAsState()
+
     HonoursProjectTheme {
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(backgroundBlue),
-            contentAlignment = Alignment.Center
+                .background(backgroundBlue)
         ) {
             TimeText()
-            when (currentScreen) {
-                MainViewModel.SetupScreen.AgePicker -> AgePickerScreen(
-                    selectedAge = selectedAge,
-                    onAgeChange = onAgeChange,
-                    onConfirm = onAgeConfirmed
-                )
-                MainViewModel.SetupScreen.StepGoalPicker -> StepGoalPickerScreen(
-                    selectedStepGoal = selectedStepGoal,
-                    onStepGoalChange = onStepGoalChange,
-                    onConfirm = onStepGoalConfirmed
-                )
-                MainViewModel.SetupScreen.StartSimulation -> StartSimulationScreen(
-                    isEvaluationMode = isEvaluationMode,
-                    onStart = onStartSimulation,
-                    onToggleEvaluation = onToggleEvaluation
-                )
-                MainViewModel.SetupScreen.SimulationRunning ->(isRunning)
-                MainViewModel.SetupScreen.SimulationPaused -> SimulationRunningScreen(
-                isPaused = isPaused,
-                progress = simulationProgress,
-                synchronizationStatus = synchronizationStatus,
-                statusMessage = statusMessage,
-                onTogglePauseResume = onTogglePauseResume,
-                onStop = onStopSimulation,
-                evaluationLoadingStatus = evaluationLoadingStatus,
-                isStartingUp = isStartingUp
-            )
-                MainViewModel.SetupScreen.SimulationStopped -> SimulationStoppedScreen(
-                    onRestart = onRestartFromSetup
-                )
+
+            SwipeDismissableNavHost(
+                navController = navController,
+                startDestination = if (isSetupComplete) NavigationRoutes.START_SIMULATION else NavigationRoutes.AGE_PICKER
+            ) {
+                composable(NavigationRoutes.AGE_PICKER) {
+                    AgePickerScreen(
+                        selectedAge = selectedAge,
+                        onAgeChange = { viewModel.onAgeSelected(it) },
+                        onConfirm = {
+                            viewModel.onAgeSelected(selectedAge)
+                            navController.navigate(NavigationRoutes.STEP_GOAL_PICKER)
+                        }
+                    )
+                }
+
+                composable(NavigationRoutes.STEP_GOAL_PICKER) {
+                    StepGoalPickerScreen(
+                        selectedStepGoal = selectedStepGoal,
+                        onStepGoalChange = { viewModel.onStepGoalSelected(it) },
+                        onConfirm = {
+                            viewModel.saveSetupPreferences()
+                            navController.navigate(NavigationRoutes.START_SIMULATION) {
+                                popUpTo(NavigationRoutes.AGE_PICKER) { inclusive = true }
+                            }
+                        }
+                    )
+                }
+
+                composable(NavigationRoutes.START_SIMULATION) {
+                    StartSimulationScreen(
+                        isEvaluationMode = isEvaluationMode,
+                        onStart = {
+                            onStartSimulation()
+                            navController.navigate(NavigationRoutes.LOADING_HISTORICAL) {
+                                popUpTo(NavigationRoutes.START_SIMULATION) { inclusive = true }
+                            }
+                        },
+                        onToggleEvaluation = { viewModel.onToggleEvaluationMode(it) }
+                    )
+                }
+
+                composable(NavigationRoutes.LOADING_HISTORICAL) {
+                    HistoricalLoadingScreen(
+                        progress = historicalLoadingProgress,
+                        statusMessage = historicalLoadingStatus,
+                        isComplete = isHistoricalLoadingComplete,
+                        onLoadingComplete = {
+                            navController.navigate(NavigationRoutes.SIMULATION_RUNNING) {
+                                popUpTo(NavigationRoutes.LOADING_HISTORICAL) { inclusive = true }
+                            }
+                        }
+                    )
+                }
+
+                composable(NavigationRoutes.SIMULATION_RUNNING) {
+                    SimulationRunningScreen(
+                        isPaused = isPaused,
+                        progress = simulationProgress,
+                        synchronizationStatus = synchronizationStatus,
+                        statusMessage = viewModel.getSimulationStatusMessage(),
+                        onTogglePauseResume = { viewModel.togglePauseResume() },
+                        onStop = {
+                            viewModel.stopSimulation()
+                            navController.navigate(NavigationRoutes.SIMULATION_STOPPED) {
+                                popUpTo(NavigationRoutes.SIMULATION_RUNNING) { inclusive = true }
+                            }
+                        },
+                        onEditStepGoal = {
+                            navController.navigate(NavigationRoutes.EDIT_STEP_GOAL)
+                        }
+                    )
+                }
+
+                composable(NavigationRoutes.EDIT_STEP_GOAL) {
+                    EditStepGoalScreen(
+                        currentStepGoal = selectedStepGoal,
+                        onStepGoalChange = { viewModel.onStepGoalSelected(it) },
+                        onConfirm = {
+                            navController.popBackStack()
+                        }
+                    )
+                }
+
+                composable(NavigationRoutes.SIMULATION_STOPPED) {
+                    SimulationStoppedScreen(
+                        onRestart = {
+                            coroutineScope.launch {
+                                viewModel.resetSimulation()
+                                navController.navigate(NavigationRoutes.START_SIMULATION) {
+                                    popUpTo(NavigationRoutes.SIMULATION_STOPPED) { inclusive = true }
+                                }
+                            }
+                        }
+                    )
+                }
             }
         }
     }
 }
+
+// --- Screen Composables ---
 
 @Composable
 fun AgePickerScreen(
@@ -452,28 +501,38 @@ fun AgePickerScreen(
     onConfirm: () -> Unit
 ) {
     val ageOptions = (1..150).toList()
-    val state = rememberPickerState(initialNumberOfOptions = ageOptions.size, initiallySelectedOption = selectedAge - 1)
+    val state = rememberPickerState(
+        initialNumberOfOptions = ageOptions.size,
+        initiallySelectedOption = selectedAge - 1
+    )
 
-    Column(
-        modifier = Modifier.fillMaxSize().padding(16.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(backgroundBlue),
+        contentAlignment = Alignment.Center
     ) {
-        Text("Select Your Age", style = MaterialTheme.typography.title3)
-        Spacer(modifier = Modifier.height(16.dp))
-        Picker(
-            state = state,
-            modifier = Modifier.weight(1f),
-            separation = 4.dp
+        Column(
+            modifier = Modifier.fillMaxSize().padding(16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
         ) {
-            Text(ageOptions[it].toString())
-        }
-        Spacer(modifier = Modifier.height(16.dp))
-        Button(onClick = {
-            onAgeChange(ageOptions[state.selectedOption])
-            onConfirm()
-        }) {
-            Text("Next")
+            Text("Select Your Age", style = MaterialTheme.typography.title3)
+            Spacer(modifier = Modifier.height(16.dp))
+            Picker(
+                state = state,
+                modifier = Modifier.weight(1f),
+                separation = 4.dp
+            ) {
+                Text(ageOptions[it].toString())
+            }
+            Spacer(modifier = Modifier.height(16.dp))
+            Button(onClick = {
+                onAgeChange(ageOptions[state.selectedOption])
+                onConfirm()
+            }) {
+                Text("Next")
+            }
         }
     }
 }
@@ -486,28 +545,38 @@ fun StepGoalPickerScreen(
 ) {
     val stepGoalOptions = (0..50000 step 500).toList()
     val initialIndex = stepGoalOptions.indexOf(selectedStepGoal).coerceAtLeast(0)
-    val state = rememberPickerState(initialNumberOfOptions = stepGoalOptions.size, initiallySelectedOption = initialIndex)
+    val state = rememberPickerState(
+        initialNumberOfOptions = stepGoalOptions.size,
+        initiallySelectedOption = initialIndex
+    )
 
-    Column(
-        modifier = Modifier.fillMaxSize().padding(16.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(backgroundBlue),
+        contentAlignment = Alignment.Center
     ) {
-        Text("Set Step Goal", style = MaterialTheme.typography.title3)
-        Spacer(modifier = Modifier.height(16.dp))
-        Picker(
-            state = state,
-            modifier = Modifier.weight(1f),
-            separation = 4.dp,
+        Column(
+            modifier = Modifier.fillMaxSize().padding(16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
         ) {
-            Text(stepGoalOptions[it].toString())
-        }
-        Spacer(modifier = Modifier.height(16.dp))
-        Button(onClick = {
-            onStepGoalChange(stepGoalOptions[state.selectedOption])
-            onConfirm()
-        }) {
-            Text("Next")
+            Text("Set Step Goal", style = MaterialTheme.typography.title3)
+            Spacer(modifier = Modifier.height(16.dp))
+            Picker(
+                state = state,
+                modifier = Modifier.weight(1f),
+                separation = 4.dp
+            ) {
+                Text(stepGoalOptions[it].toString())
+            }
+            Spacer(modifier = Modifier.height(16.dp))
+            Button(onClick = {
+                onStepGoalChange(stepGoalOptions[state.selectedOption])
+                onConfirm()
+            }) {
+                Text("Next")
+            }
         }
     }
 }
@@ -518,60 +587,136 @@ fun StartSimulationScreen(
     onStart: () -> Unit,
     onToggleEvaluation: (Boolean) -> Unit
 ) {
-    Column(
-        modifier = Modifier.fillMaxSize().padding(16.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(backgroundBlue),
+        contentAlignment = Alignment.Center
     ) {
-        Spacer(modifier = Modifier.height(16.dp))
-
-        // Enhanced ToggleChip for evaluation mode
-        ToggleChip(
-            checked = isEvaluationMode,
-            onCheckedChange = onToggleEvaluation,
-            label = { Text("Evaluation Mode") },
-            modifier = Modifier.fillMaxWidth(),
-            toggleControl = {
-                Switch(
-                    checked = isEvaluationMode,
-                    modifier = Modifier.semantics {
-                        this.contentDescription = if (isEvaluationMode) "Evaluation mode on" else "Evaluation mode off"
-                    }
-                )
-            },
-            secondaryLabel = {
-                Text(if (isEvaluationMode) "Using historical data (Aug 2023)" else "Using current date simulation")
-            },
-            colors = ToggleChipDefaults.toggleChipColors(
-                checkedEndBackgroundColor = MaterialTheme.colors.primaryVariant,
-                uncheckedEndBackgroundColor = MaterialTheme.colors.surface,
-                uncheckedContentColor = MaterialTheme.colors.onSurface,
-            )
-        )
-
-        Spacer(modifier = Modifier.height(24.dp))
-
-        // Enhanced Start button with mode indicator
-        Button(
-            onClick = onStart,
-            modifier = Modifier.width(60.dp)
+        Column(
+            modifier = Modifier.fillMaxSize().padding(16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
         ) {
-            Text(if (isEvaluationMode) "Start" else "Start")
+            Spacer(modifier = Modifier.height(16.dp))
+
+            ToggleChip(
+                checked = isEvaluationMode,
+                onCheckedChange = onToggleEvaluation,
+                label = { Text("Evaluation Mode") },
+                modifier = Modifier.fillMaxWidth(),
+                toggleControl = {
+                    Switch(
+                        checked = isEvaluationMode,
+                        modifier = Modifier.semantics {
+                            this.contentDescription = if (isEvaluationMode) "On" else "Off"
+                        }
+                    )
+                },
+                secondaryLabel = {
+                    Text(if (isEvaluationMode) "Historical (Aug 2023)" else "Current date")
+                }
+            )
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            Button(
+                onClick = onStart,
+                modifier = Modifier.width(120.dp)
+            ) {
+                Text("Start")
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Text(
+                text = if (isEvaluationMode) {
+                    "Will load historical data from August 2023"
+                } else {
+                    "Will use current date and time"
+                },
+                style = MaterialTheme.typography.caption1,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(horizontal = 8.dp)
+            )
         }
+    }
+}
 
-        Spacer(modifier = Modifier.height(8.dp))
+@Composable
+fun HistoricalLoadingScreen(
+    progress: Float,
+    statusMessage: String,
+    isComplete: Boolean,
+    onLoadingComplete: () -> Unit
+) {
+    val isDataAccessible by SimulationManager.isDataAccessible.collectAsState()
 
-        // Mode description
-        Text(
-            text = if (isEvaluationMode) {
-                "Evaluation mode will simulate data from August 2023"
-            } else {
-                "Simulation will use current date and time"
-            },
-            style = MaterialTheme.typography.caption1,
-            textAlign = TextAlign.Center,
-            modifier = Modifier.padding(horizontal = 8.dp)
-        )
+    // Only navigate when BOTH complete AND accessible
+    LaunchedEffect(isComplete, isDataAccessible) {
+        if (isComplete && isDataAccessible) {
+            // Extra safety delay
+            delay(500)
+
+            // Final verification
+            val snapshot = HealthDataStreamManager.getCurrentSnapshot()
+            if (snapshot.cumulativeSteps > 0 || snapshot.heartRate > 0) {
+                delay(1000) // Give UI components time to initialize
+                onLoadingComplete()
+            }
+        }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(backgroundBlue),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            modifier = Modifier.fillMaxSize().padding(16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            CircularProgressIndicator(
+                progress = if (isComplete && !isDataAccessible) 0.95f else progress,
+                modifier = Modifier.size(64.dp)
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Text(
+                text = if (isComplete && !isDataAccessible) {
+                    "Verifying data accessibility..."
+                } else {
+                    statusMessage
+                },
+                style = MaterialTheme.typography.body1,
+                textAlign = TextAlign.Center
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Text(
+                text = if (isComplete && !isDataAccessible) {
+                    "95%"
+                } else {
+                    "${(progress * 100).toInt()}%"
+                },
+                style = MaterialTheme.typography.caption1,
+                textAlign = TextAlign.Center
+            )
+
+            if (isComplete && isDataAccessible) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "✓ Data Ready",
+                    style = MaterialTheme.typography.caption1,
+                    color = follicleGreen,
+                    textAlign = TextAlign.Center
+                )
+            }
+        }
     }
 }
 
@@ -581,140 +726,175 @@ fun SimulationRunningScreen(
     progress: Float,
     synchronizationStatus: String,
     statusMessage: String,
-    evaluationLoadingStatus: String,
-    isStartingUp: Boolean,
     onTogglePauseResume: () -> Unit,
-    onStop: () -> Unit
+    onStop: () -> Unit,
+    onEditStepGoal: () -> Unit
 ) {
-    var isLoading by remember { mutableStateOf(true) }
+    val listState = rememberScalingLazyListState()
 
-    LaunchedEffect(key1 = Unit) {
-        delay(2500)
-        isLoading = false
-    }
-
-    Column(
-        modifier = Modifier.fillMaxSize().padding(16.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(backgroundBlue)
     ) {
-        if (isLoading || isStartingUp) {
-            CircularProgressIndicator(modifier = Modifier.size(48.dp))
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // Show specific loading status
-            Text(
-                if (evaluationLoadingStatus.isNotBlank() && evaluationLoadingStatus != "Ready") {
-                    evaluationLoadingStatus
-                } else {
-                    "Starting Simulation..."
-                },
-                textAlign = TextAlign.Center,
-                style = MaterialTheme.typography.body1
-            )
-
-            if (evaluationLoadingStatus.contains("historical")) {
-                Spacer(modifier = Modifier.height(8.dp))
+        ScalingLazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            state = listState,
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            item {
                 Text(
-                    "This may take a moment...",
+                    statusMessage,
+                    style = MaterialTheme.typography.title3,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(top = 16.dp)
+                )
+            }
+
+            item {
+                if (progress > 0) {
+                    CircularProgressIndicator(
+                        progress = progress / 100f,
+                        modifier = Modifier.size(40.dp).padding(vertical = 8.dp)
+                    )
+                }
+            }
+
+            item {
+                Text(
+                    synchronizationStatus,
                     style = MaterialTheme.typography.caption2,
-                    textAlign = TextAlign.Center
-                )
-            }
-        } else {
-            // Status text
-            Text(
-                statusMessage,
-                style = MaterialTheme.typography.title3,
-                textAlign = TextAlign.Center
-            )
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // Progress indicator
-            if (progress > 0) {
-                CircularProgressIndicator(
-                    progress = progress / 100f,
-                    modifier = Modifier.size(40.dp)
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    "${progress.toInt()}% Complete",
-                    style = MaterialTheme.typography.caption1
+                    color = if (synchronizationStatus == "Synchronized") {
+                        MaterialTheme.colors.primary
+                    } else {
+                        MaterialTheme.colors.error
+                    },
+                    modifier = Modifier.padding(bottom = 16.dp)
                 )
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // Synchronization status
-            Text(
-                synchronizationStatus,
-                style = MaterialTheme.typography.caption2,
-                color = if (synchronizationStatus == "Synchronized") {
-                    MaterialTheme.colors.primary
-                } else {
-                    MaterialTheme.colors.error
-                }
-            )
-
-            Spacer(modifier = Modifier.height(24.dp))
-
-            // Control buttons (only show when not loading)
-            Row(
-                horizontalArrangement = Arrangement.Center,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                // Pause/Resume Button
-                Button(
-                    onClick = onTogglePauseResume,
-                    modifier = Modifier.size(60.dp),
-                    shape = CircleShape
+            item {
+                Row(
+                    horizontalArrangement = Arrangement.Center,
+                    modifier = Modifier.padding(vertical = 8.dp)
                 ) {
-                    Icon(
-                        painter = painterResource(id = if (isPaused) R.drawable.play_icon else R.drawable.pause_icon),
-                        contentDescription = if (isPaused) "Resume" else "Pause"
-                    )
+                    Button(
+                        onClick = onTogglePauseResume,
+                        modifier = Modifier.size(50.dp),
+                        shape = CircleShape
+                    ) {
+                        Icon(
+                            painter = painterResource(
+                                id = if (isPaused) R.drawable.play_icon else R.drawable.pause_icon
+                            ),
+                            contentDescription = if (isPaused) "Resume" else "Pause"
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Button(
+                        onClick = onStop,
+                        modifier = Modifier.size(50.dp),
+                        shape = CircleShape,
+                        colors = ButtonDefaults.buttonColors(
+                            backgroundColor = MaterialTheme.colors.error
+                        )
+                    ) {
+                        Icon(
+                            painter = painterResource(id = R.drawable.stop_icon),
+                            contentDescription = "Stop"
+                        )
+                    }
                 }
-                Spacer(modifier = Modifier.width(16.dp))
-                // Stop Button
-                Button(
-                    onClick = onStop,
-                    modifier = Modifier.size(60.dp),
-                    shape = CircleShape,
-                    colors = ButtonDefaults.buttonColors(backgroundColor = MaterialTheme.colors.error)
-                ) {
-                    Icon(
-                        painter = painterResource(id = R.drawable.stop_icon),
-                        contentDescription = "Stop"
+            }
+
+            item {
+                Chip(
+                    onClick = onEditStepGoal,
+                    label = { Text("Edit Step Goal") },
+                    modifier = Modifier.fillMaxWidth(0.9f).padding(vertical = 8.dp),
+                    colors = ChipDefaults.chipColors(
+                        backgroundColor = MaterialTheme.colors.surface
                     )
-                }
+                )
             }
         }
     }
 }
+
+@Composable
+fun EditStepGoalScreen(
+    currentStepGoal: Int,
+    onStepGoalChange: (Int) -> Unit,
+    onConfirm: () -> Unit
+) {
+    val stepGoalOptions = (0..50000 step 500).toList()
+    val initialIndex = stepGoalOptions.indexOf(currentStepGoal).coerceAtLeast(0)
+    val state = rememberPickerState(
+        initialNumberOfOptions = stepGoalOptions.size,
+        initiallySelectedOption = initialIndex
+    )
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(backgroundBlue),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            modifier = Modifier.fillMaxSize().padding(16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            Text("Edit Step Goal", style = MaterialTheme.typography.title3)
+            Spacer(modifier = Modifier.height(16.dp))
+            Picker(
+                state = state,
+                modifier = Modifier.weight(1f),
+                separation = 4.dp
+            ) {
+                Text(stepGoalOptions[it].toString())
+            }
+            Spacer(modifier = Modifier.height(16.dp))
+            Button(onClick = {
+                onStepGoalChange(stepGoalOptions[state.selectedOption])
+                onConfirm()
+            }) {
+                Text("Save")
+            }
+        }
+    }
+}
+
 @Composable
 fun SimulationStoppedScreen(
     onRestart: () -> Unit
 ) {
-    Column(
-        modifier = Modifier.fillMaxSize().padding(16.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(backgroundBlue),
+        contentAlignment = Alignment.Center
     ) {
-        Text(
-            "Simulation Complete",
-            style = MaterialTheme.typography.title2,
-            textAlign = TextAlign.Center
-        )
-        Spacer(modifier = Modifier.height(16.dp))
-        Text(
-            "The simulation has been completed successfully. All health data has been processed.",
-            style = MaterialTheme.typography.body1,
-            textAlign = TextAlign.Center
-        )
-        Spacer(modifier = Modifier.height(24.dp))
-        Button(onClick = onRestart) {
-            Text("Start New Session")
+        Column(
+            modifier = Modifier.fillMaxSize().padding(16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            Text(
+                "Simulation Complete",
+                style = MaterialTheme.typography.title2,
+                textAlign = TextAlign.Center
+            )
+            Spacer(modifier = Modifier.height(16.dp))
+            Text(
+                "All health data has been processed successfully.",
+                style = MaterialTheme.typography.body1,
+                textAlign = TextAlign.Center
+            )
+            Spacer(modifier = Modifier.height(24.dp))
+            Button(onClick = onRestart) {
+                Text("New Session")
+            }
         }
     }
 }

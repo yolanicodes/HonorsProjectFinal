@@ -29,6 +29,9 @@ import androidx.wear.tiles.tooling.preview.TilePreviewData
 import com.example.honoursproject.CyclePhase
 import com.example.honoursproject.R
 import com.example.honoursproject.dataservices.HealthDataRecord
+import com.example.honoursproject.dataservices.HealthDataSnapshot
+import com.example.honoursproject.dataservices.HealthDataStreamManager
+import com.example.honoursproject.dataservices.IntentExtras
 import com.example.honoursproject.dataservices.SimulationManager
 import com.example.honoursproject.presentation.theme.TILE_follicleGreen
 import com.example.honoursproject.presentation.theme.TILE_lutealPurple
@@ -41,6 +44,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -119,71 +124,73 @@ class WatchfaceTileService : SuspendingTileService() {
                 requestTileUpdate(context)
             }
         }
-
-        fun getCurrentHeartRate(): Double = 0.0 // Not used in new implementation
-        fun getCurrentSteps(): Int = 0 // Not used in new implementation
-        fun getCurrentEnergy(): Double = 0.0 // Not used in new implementation
     }
 
     override fun onCreate() {
         super.onCreate()
         appContext = applicationContext
+        dataCollectionJob?.cancel()
 
-        // Only listen for meaningful changes in specific metrics
         dataCollectionJob = serviceScope.launch {
-            try {
-                // Create a flow that only emits when key metrics change
-                SimulationManager.healthDataStream
-                    .map { healthData ->
-                        MetricSnapshot(
-                            heartRate = healthData.heartRate.toInt(),
-                            stepCount = SimulationManager.getCumulativeSteps(),
-                            energyBurned = SimulationManager.getCumulativeEnergy().toInt(),
-                            cycleDay = healthData.cycleDay,
-                            cyclePhase = healthData.cyclePhase
+            // Wait for historical data
+            HealthDataStreamManager.dataStream
+                .filter { it.isHistoricalDataLoaded }
+                .first()
+
+            Log.d(TAG, "Historical data loaded, starting watchface tile updates")
+
+            // Collect all changes
+            HealthDataStreamManager.dataStream
+                .distinctUntilChanged { old, new ->
+                    // Update only if data actually changed
+                    old.cumulativeSteps == new.cumulativeSteps &&
+                            old.heartRate == new.heartRate &&
+                            old.cumulativeEnergyBurned == new.cumulativeEnergyBurned &&
+                            old.cyclePhase == new.cyclePhase &&
+                            old.cycleDay == new.cycleDay
+                }
+                .collect { snapshot ->
+                    val currentTime = System.currentTimeMillis()
+
+                    // Throttle updates to avoid excessive re-renders
+                    if (currentTime - lastUpdateTime.get() >= minUpdateInterval) {
+                        Log.d(TAG, "Metric change detected: " +
+                                "HR=${snapshot.heartRate.toInt()}, " +
+                                "Steps=${snapshot.cumulativeSteps}, " +
+                                "Cycle=${snapshot.cyclePhase} D${snapshot.cycleDay}")
+
+                        // Update cached data
+                        cachedHealthData = HealthDataRecord(
+                            heartRate = snapshot.heartRate,
+                            stepCount = snapshot.cumulativeSteps,
+                            activeEnergyBurned = snapshot.cumulativeEnergyBurned,
+                            cyclePhase = snapshot.cyclePhase,
+                            cycleDay = snapshot.cycleDay
                         )
+                        lastCacheUpdate = System.currentTimeMillis()
+
+                        // Trigger tile update
+                        requestTileUpdate(appContext!!)
+                        lastUpdateTime.set(currentTime)
                     }
-                    .distinctUntilChanged() // Only emit when snapshot actually changes
-                    .collect { snapshot ->
-                        val currentTime = System.currentTimeMillis()
-
-                        // Throttle updates to prevent excessive tile refreshes
-                        if (currentTime - lastUpdateTime.get() >= minUpdateInterval) {
-                            Log.d(TAG, "Metric change detected: HR=${snapshot.heartRate}, Steps=${snapshot.stepCount}")
-
-                            // Update cache
-                            updateCacheFromSnapshot(snapshot)
-
-                            // Request tile update
-                            launch {
-                                try {
-                                    getUpdater(this@WatchfaceTileService)
-                                        .requestUpdate(WatchfaceTileService::class.java)
-                                    lastUpdateTime.set(currentTime)
-                                } catch (e: Exception) {
-                                    Log.e(TAG, "Error requesting tile update", e)
-                                }
-                            }
-                        }
-                    }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error in selective data collection", e)
-            }
+                }
         }
     }
+
 
     override fun onDestroy() {
         super.onDestroy()
         dataCollectionJob?.cancel()
     }
 
-    private suspend fun updateCacheFromSnapshot(snapshot: MetricSnapshot) {
+    private suspend fun updateCacheFromSnapshot(snapshot: HealthDataSnapshot) {
         try {
-            val currentData = SimulationManager.healthDataStream.value
-            cachedHealthData = currentData.copy(
-                stepCount = snapshot.stepCount,
-                heartRate = snapshot.heartRate.toDouble(),
-                activeEnergyBurned = snapshot.energyBurned.toDouble()
+            cachedHealthData = HealthDataRecord(
+                heartRate = snapshot.heartRate,
+                stepCount = snapshot.cumulativeSteps,
+                activeEnergyBurned = snapshot.cumulativeEnergyBurned,
+                cyclePhase = snapshot.cyclePhase,
+                cycleDay = snapshot.cycleDay
             )
             lastCacheUpdate = System.currentTimeMillis()
         } catch (e: Exception) {
@@ -219,7 +226,20 @@ class WatchfaceTileService : SuspendingTileService() {
             // Get fresh data if cache is expired, otherwise use cache
             val healthData = if (System.currentTimeMillis() - lastCacheUpdate > cacheExpiryMs) {
                 withTimeoutOrNull(1500L) {
-                    SimulationManager.healthDataStream.value
+                    // FIX: Get the current snapshot, not the flow itself
+                    HealthDataStreamManager.getCurrentSnapshot().let { snapshot ->
+                        HealthDataRecord(
+                            heartRate = snapshot.heartRate,
+                            stepCount = snapshot.cumulativeSteps,
+                            activeEnergyBurned = snapshot.cumulativeEnergyBurned,
+                            cyclePhase = snapshot.cyclePhase,
+                            cycleDay = snapshot.cycleDay,
+                            basalEnergyBurned = snapshot.basalEnergyBurned,
+                            vo2Max = snapshot.vo2Max,
+                            restingHeartRate = snapshot.restingHeartRate,
+                            basalBodyTemperature = snapshot.basalBodyTemperature
+                        )
+                    }
                 } ?: cachedHealthData
             } else {
                 cachedHealthData
@@ -279,7 +299,7 @@ class WatchfaceTileService : SuspendingTileService() {
 }
 
 // --- Full Original UI Layout ---
-private fun tileLayout(
+fun tileLayout(
     context: Context,
     deviceParams: DeviceParametersBuilders.DeviceParameters,
     healthData: HealthDataRecord
@@ -333,9 +353,11 @@ private fun tileLayout(
                             Column.Builder()
                                 .setWidth(DimensionBuilders.wrap())
                                 .setHorizontalAlignment(LayoutElementBuilders.HORIZONTAL_ALIGN_CENTER)
-                                .addContent(metricColumn(context, METRIC_STEPS, ID_STEPS_ICON, R.drawable.steps_icon, SimulationManager.getCumulativeSteps().toString()))
+                                // FIX: Use healthData.stepCount instead of calling getCumulativeSteps()
+                                .addContent(metricColumn(context, METRIC_STEPS, ID_STEPS_ICON, R.drawable.steps_icon, healthData.stepCount.toString()))
                                 .addContent(Spacer.Builder().setHeight(DimensionBuilders.dp(16f)).build())
-                                .addContent(metricColumn(context, METRIC_ENERGY, ID_ENERGY_ICON, R.drawable.fire_icon, String.format("%.2f", SimulationManager.getCumulativeEnergy())))
+                                // FIX: Use healthData.activeEnergyBurned instead of calling getCumulativeEnergy()
+                                .addContent(metricColumn(context, METRIC_ENERGY, ID_ENERGY_ICON, R.drawable.fire_icon, String.format("%.2f", healthData.activeEnergyBurned)))
                                 .build()
                         )
                         .build()
@@ -356,7 +378,7 @@ private fun clickableForMetric(context: Context, metricType: String, iconResId: 
                         .setPackageName(context.packageName)
                         .setClassName("${context.packageName}.presentation.MetricDetailActivity")
                         .addKeyToExtraMapping(
-                            EXTRA_METRIC_TYPE,
+                            IntentExtras.EXTRA_METRIC_TYPE,  // FIXED: Use IntentExtras
                             ActionBuilders.AndroidStringExtra.Builder().setValue(metricType).build()
                         )
                         .addKeyToExtraMapping(
@@ -369,7 +391,6 @@ private fun clickableForMetric(context: Context, metricType: String, iconResId: 
         )
         .build()
 }
-
 private fun dateHeader(context: Context, time: ZonedDateTime): LayoutElementBuilders.LayoutElement {
     return Row.Builder()
         .setVerticalAlignment(LayoutElementBuilders.VERTICAL_ALIGN_CENTER)
