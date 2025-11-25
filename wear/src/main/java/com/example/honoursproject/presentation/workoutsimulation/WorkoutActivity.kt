@@ -40,6 +40,8 @@ import androidx.wear.compose.material.Text
 import com.example.honoursproject.R
 import com.example.honoursproject.CyclePhase
 import com.example.honoursproject.dataservices.*
+import com.example.honoursproject.presentation.SetupPreferences
+import com.example.honoursproject.presentation.setupDataStore
 import com.example.honoursproject.presentation.theme.*
 import com.example.honoursproject.tile.MenstrualCycleInfo
 import kotlinx.coroutines.Job
@@ -89,16 +91,17 @@ class WorkoutActivity : ComponentActivity() {
         }
         val actualEndTime = actualStartTime.plusMinutes(workoutDurationMinutes.toLong())
 
-        // Notify the manager that workout was started by user
-        // The manager will automatically detect if it's early, on-time, or late
         val now = LocalDateTime.now()
         WorkoutSimulationManager.userInitiatedWorkout(now)
 
-        // Check if user is starting early for local UI handling
-        val isEarlyStart = now.isBefore(actualStartTime.minusMinutes(1)) // Allow 1 minute buffer
+        val isEarlyStart = now.isBefore(actualStartTime.minusMinutes(1))
 
         lifecycleScope.launch {
-            val userAge = SimulationManager.getUserAge(applicationContext)
+            // Wait for data accessibility before proceeding
+            val dataReady = SimulationManager.isDataAccessible.first { it }
+            Log.i("WorkoutActivity", "Data accessibility confirmed: $dataReady")
+
+            val userAge = getUserAge(applicationContext)
 
             val factory = WorkoutViewModel.Factory(
                 context = applicationContext,
@@ -111,11 +114,9 @@ class WorkoutActivity : ComponentActivity() {
 
             viewModel = ViewModelProvider(this@WorkoutActivity, factory)[WorkoutViewModel::class.java]
 
-            // Start the background service
             val serviceIntent = Intent(this@WorkoutActivity, WorkoutService::class.java)
             startService(serviceIntent)
             bindService(serviceIntent, serviceConnection, BIND_AUTO_CREATE)
-
             setContent {
                 HonoursProjectTheme {
                     val uiState by viewModel.uiState.collectAsState()
@@ -131,6 +132,7 @@ class WorkoutActivity : ComponentActivity() {
 
                     val navController = rememberNavController()
 
+                    //fix update notification
                     // Update notification with current workout data
                     LaunchedEffect(uiState.elapsedTime, uiState.heartRate) {
                         if (screenState == WorkoutScreenState.IN_PROGRESS && !isPaused) {
@@ -277,6 +279,16 @@ class WorkoutActivity : ComponentActivity() {
         val serviceIntent = Intent(this, WorkoutService::class.java)
         stopService(serviceIntent)
     }
+    private suspend fun getUserAge(context: Context): Int {
+        return try {
+            context.setupDataStore.data
+                .map { preferences -> preferences[SetupPreferences.AGE] ?: 25 }
+                .first()
+        } catch (e: Exception) {
+            Log.e("WorkoutActivity", "Error getting user age", e)
+            25
+        }
+    }
 }
 
 enum class WorkoutScreenState {
@@ -368,8 +380,28 @@ class WorkoutViewModel(private val context: Context, private val workoutType: St
     private var isFirstDataPoint = true
 
     init {
-        startProgressMonitoring()
+        //startProgressMonitoring()
+        startSynchronizationMonitoring() // Add this
         prepareForWorkout()
+    }
+
+    // Add new function
+    private fun startSynchronizationMonitoring() {
+        viewModelScope.launch {
+            combine(
+                SimulationManager.simulationState,
+                SimulationManager.isDataAccessible
+            ) { simState, dataAccessible ->
+                SimulationProgress(
+                    currentIndex = simState.currentIndex,
+                    totalRecords = simState.totalRecords,
+                    isSyncing = !dataAccessible || simState.isPaused,
+                    isComplete = !simState.isRunning && simState.currentIndex >= simState.totalRecords
+                )
+            }.collect { progress ->
+                _simulationProgress.value = progress
+            }
+        }
     }
 
     fun getTimeToActualStart(): Long {
@@ -381,23 +413,7 @@ class WorkoutViewModel(private val context: Context, private val workoutType: St
         }
     }
 
-    private fun startProgressMonitoring() {
-        progressJob = viewModelScope.launch {
-            while (isActive) {
-                val progress = SimulationManager.getCurrentProgress()
-                val isComplete = SimulationManager.isComplete()
 
-                _simulationProgress.value = SimulationProgress(
-                    currentIndex = progress.first,
-                    totalRecords = progress.second,
-                    isSyncing = false, // Could be enhanced to detect sync state
-                    isComplete = isComplete
-                )
-
-                delay(2000) // Update every 2 seconds
-            }
-        }
-    }
 
     private fun prepareForWorkout() {
         viewModelScope.launch {
@@ -481,43 +497,50 @@ class WorkoutViewModel(private val context: Context, private val workoutType: St
 
         workoutJob = viewModelScope.launch {
             try {
-                SimulationManager.healthDataStream.collect { healthData ->
+                // Use HealthDataStreamManager instead of SimulationManager
+                HealthDataStreamManager.dataStream.collect { snapshot ->
                     while (isPaused.value) {
                         delay(1000)
                     }
 
-                    if (isFirstDataPoint && healthData.stepCount > 0) {
-                        initialStepCount = healthData.stepCount
-                        initialActiveEnergy = healthData.activeEnergyBurned
-                        initialBasalEnergy = healthData.basalEnergyBurned
+                    // Verify data is from a valid source
+                    if (!snapshot.isHistoricalDataLoaded) {
+                        Log.w("WorkoutViewModel", "Waiting for historical data to load...")
+                        return@collect
+                    }
+
+                    if (isFirstDataPoint && snapshot.cumulativeSteps > 0) {
+                        initialStepCount = snapshot.cumulativeSteps
+                        initialActiveEnergy = snapshot.cumulativeEnergyBurned
+                        initialBasalEnergy = snapshot.basalEnergyBurned
                         isFirstDataPoint = false
                     }
 
-                    val heartZone = calculateHeartRateZone(healthData.heartRate, userAge)
+                    val heartZone = calculateHeartRateZone(snapshot.heartRate, userAge)
 
-                    heartRateHistory.add(healthData.heartRate.toInt())
+                    heartRateHistory.add(snapshot.heartRate.toInt())
                     val newAvgHeartRate = heartRateHistory.average().roundToInt()
 
-                    val stepsInWorkout = healthData.stepCount - initialStepCount
+                    val stepsInWorkout = snapshot.cumulativeSteps - initialStepCount
                     val distanceInKm = (stepsInWorkout * 0.762) / 1000.0
-                    val activeEnergyInWorkout: Double = (healthData.activeEnergyBurned - initialActiveEnergy)
-                    val basalEnergyInWorkout: Double = (healthData.basalEnergyBurned - initialBasalEnergy)
+                    val activeEnergyInWorkout = snapshot.cumulativeEnergyBurned - initialActiveEnergy
+                    val basalEnergyInWorkout = snapshot.basalEnergyBurned - initialBasalEnergy
 
                     val cyclePhase = try {
-                        CyclePhase.valueOf(healthData.cyclePhase.uppercase())
+                        CyclePhase.valueOf(snapshot.cyclePhase.uppercase())
                     } catch (e: Exception) {
                         CyclePhase.UNKNOWN
                     }
 
                     _uiState.value = _uiState.value.copy(
-                        heartRate = healthData.heartRate.toInt(),
+                        heartRate = snapshot.heartRate.toInt(),
                         distance = distanceInKm,
                         energy = activeEnergyInWorkout,
                         basalEnergy = basalEnergyInWorkout,
                         avgHeartRate = newAvgHeartRate,
                         cycleInfo = MenstrualCycleInfo(
                             phase = cyclePhase,
-                            dayOfCycle = healthData.cycleDay
+                            dayOfCycle = snapshot.cycleDay
                         ),
                         heartZone = heartZone
                     )
@@ -569,6 +592,20 @@ class WorkoutViewModel(private val context: Context, private val workoutType: St
             throw IllegalArgumentException("Unknown ViewModel class")
         }
     }
+    data class WorkoutMetrics(
+        val elapsedTime: Long = 0,
+        val heartRate: Int = 0,
+        val distance: Double = 0.0,
+        val energy: Double = 0.0,
+        val basalEnergy: Double = 0.0,
+        val avgHeartRate: Int = 0,
+        val cycleInfo: MenstrualCycleInfo = MenstrualCycleInfo(
+            phase = CyclePhase.UNKNOWN,
+            dayOfCycle = 0
+        ),
+        val heartZone: HeartRateZone = HeartRateZone.ZONE_1,
+        val isSynchronized: Boolean = true // Add this
+    )
 }
 
 // --- Enhanced Composable Functions ---
