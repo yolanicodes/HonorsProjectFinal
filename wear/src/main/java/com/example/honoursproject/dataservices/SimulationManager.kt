@@ -1,4 +1,3 @@
-// Enhanced SimulationManager.kt with improved pause/resume and UI streaming
 package com.example.honoursproject.dataservices
 
 import android.content.Context
@@ -13,1083 +12,714 @@ import java.io.IOException
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import java.time.temporal.ChronoUnit
-import java.util.concurrent.TimeUnit
 import java.time.LocalDate
 import java.time.ZoneId
 
-// Create DataStore delegate on Context
 val Context.simulationDataStore by preferencesDataStore(name = "simulation_prefs")
 
-// Enhanced simulation state tracking
 data class SimulationState(
     val isRunning: Boolean = false,
     val isPaused: Boolean = false,
     val currentIndex: Int = 0,
     val totalRecords: Int = 0,
-    val progressPercentage: Float = 0f,
     val lastUpdateTime: Long = 0L
 )
 
+/**
+ * FIXED SimulationManager with proper evaluation mode handling
+ */
 object SimulationManager {
+    private const val HEARTBEAT_INTERVAL_MS = 2000L
+    private const val HISTORICAL_EMISSION_INTERVAL = 50
+    private const val VERIFICATION_DELAY_MS = 1000L
+    private const val MAX_VERIFICATION_ATTEMPTS = 10
+    private var heartbeatJob: Job? = null
+    private const val TAG = "SimulationManager"
 
-    const val MAX_HEART_RATE = 220
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var simulationJob: Job? = null
 
-    // Enhanced persistence keys for global interruption tracking
-    private val KEY_INDEX = intPreferencesKey("csv_index")
-    private val KEY_LAST_PAUSE_TIME = longPreferencesKey("last_pause_time")
-    private val KEY_TOTAL_PAUSE_DURATION = longPreferencesKey("total_pause_duration")
-    private val KEY_SIMULATION_START_TIME = longPreferencesKey("simulation_start_time")
-    private val KEY_IS_PAUSED = booleanPreferencesKey("is_paused")
-    private val KEY_LAST_RECORD_TIME = longPreferencesKey("last_record_time")
-    private val KEY_CUMULATIVE_STEPS = intPreferencesKey("cumulative_steps")
-    private val KEY_CUMULATIVE_ENERGY = longPreferencesKey("cumulative_energy") // Store as long (multiplied by 1000)
-
-    // Enhanced state flows for UI updates
-    private val _healthDataStream = MutableStateFlow(HealthDataRecord())
-    val healthDataStream = _healthDataStream.asStateFlow()
-
+    // State flows
     private val _simulationState = MutableStateFlow(SimulationState())
     val simulationState = _simulationState.asStateFlow()
 
-    private val _synchronizationProgress = MutableStateFlow(0f)
-    val synchronizationProgress = _synchronizationProgress.asStateFlow()
-
-    // Global simulation state tracking
-    private var simulationJob: Job? = null
-    private var synchronizationJob: Job? = null
-    val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private var simulationStartTime: Long = 0L
-    private var lastPauseTime: Long = 0L
-    private var totalPauseDuration: Long = 0L
-    private var isPaused: Boolean = false
-    private var lastRecordTime: Long = 0L
-
-    private val healthInsertBuffer = mutableListOf<HealthRecordEntity>()
-    private val archiveInsertBuffer = mutableListOf<ArchiveRecordEntity>()
-    private var lastBatchInsert = 0L
-    private const val batchSize = 50
-    private const val batchTimeoutMs = 30000L
-    private var evaluationModeStartSystemTime: LocalDateTime? = null
-    private var historicalDataLoadComplete = false
-
-    // Simulation data state
-    private var lastUiUpdate = 0L
-    private val uiUpdateThrottle = 250L
-    private var cumulativeSteps = 0
-    private var cumulativeEnergy = 0.0
-    private var currentSimulationDay: Int = -1
-    private var lastKnownRecord = HealthDataRecord()
-    private var currentIndex: Int = 0
-    private var dataLines: List<String> = emptyList()
-    private var isSimulationComplete: Boolean = false
-
-    // Enhanced UI streaming queue for missed data
-    private val pendingUIUpdates = mutableListOf<HealthDataRecord>()
-    private var uiStreamingJob: Job? = null
     private val _historicalLoadingProgress = MutableStateFlow(0f)
     val historicalLoadingProgress = _historicalLoadingProgress.asStateFlow()
-    var shortTermDb : HealthDatabase?=null
-    var shortTermDao: HealthRecordDao? = null
-    var archiveDb: ArchiveDatabase? = null
-    var archiveDao: ArchiveRecordDao ?= null
+
     private val _isHistoricalLoadingComplete = MutableStateFlow(false)
     val isHistoricalLoadingComplete = _isHistoricalLoadingComplete.asStateFlow()
-    private val recordPool = mutableListOf<HealthDataRecord>()
-    private fun getPooledRecord(): HealthDataRecord {
-        return if (recordPool.isNotEmpty()) {
-            recordPool.removeLastOrNull() ?: HealthDataRecord()
-        } else {
-            HealthDataRecord()
-        }
+
+    // NEW: Track if data is accessible to UIs
+    private val _isDataAccessible = MutableStateFlow(false)
+    val isDataAccessible = _isDataAccessible.asStateFlow()
+
+    // Dependencies
+    private lateinit var repository: HealthDataRepository
+
+    // Tracking variables
+    private var lastKnownCyclePhase = ""
+    private var lastKnownCycleDay = 0
+    private var cumulativeSteps = 0
+    private var cumulativeEnergy = 0.0
+
+    /**
+     * Initialize with repository (Dependency Injection)
+     */
+    fun initialize(repo: HealthDataRepository) {
+        repository = repo
+        Log.i(TAG, "Initialized with repository")
     }
 
-    private fun returnToPool(record: HealthDataRecord) {
-        if (recordPool.size < 10) { // Limit pool size
-            recordPool.add(record)
-        }
-    }
-    suspend fun getUserAge(context: Context): Int {
-        return context.setupDataStore.data
-            .map { preferences ->
-                preferences[SetupPreferences.AGE] ?: 18
-            }
-            .first()
-    }
-    private suspend fun initializeCumulativeValuesFromHistoricalData(context: Context) {
-        if (!EvaluationState.isEvaluationMode.value) return
-
-        try {
-            val archiveDao = ArchiveDatabase.getInstance(context).archiveRecordDao()
-            val boundarySystemTime = evaluationModeStartSystemTime ?: LocalDateTime.now()
-            val boundaryTimestamp = LocalDateTime.of(
-                EvaluationState.EVALUATION_DATE,
-                boundarySystemTime.toLocalTime()
-            ).atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
-
-            // Get the last historical record before the boundary
-            val dayStart = EvaluationState.EVALUATION_DATE.atStartOfDay(ZoneId.systemDefault())
-                .toInstant().toEpochMilli()
-
-            val historicalRecords = archiveDao.getRecordsBetween(dayStart, boundaryTimestamp)
-
-            if (historicalRecords.isNotEmpty()) {
-                val lastHistoricalRecord = historicalRecords.maxByOrNull { it.timestamp }
-
-                if (lastHistoricalRecord != null) {
-                    cumulativeSteps = lastHistoricalRecord.stepCount
-                    cumulativeEnergy = lastHistoricalRecord.activeEnergyBurned
-
-                    Log.i("SimulationManager",
-                        "Initialized cumulative values from historical data: " +
-                                "Steps=$cumulativeSteps, Energy=$cumulativeEnergy")
-                }
-            }
-        } catch (e: Exception) {
-            Log.e("SimulationManager", "Error initializing from historical data", e)
-        }
-    }
-    fun startStreaming(context: Context, csvFileName: String) {
+    /**
+     * Start streaming pipeline with smart loading
+     *
+     * Flow:
+     * 1. Check if historical data already loaded
+     * 2. If yes: Load from database (fast)
+     * 3. If no: Load from CSV (slow, one-time)
+     * 4. Verify data accessibility
+     * 5. Start heartbeat and live simulation
+     */
+    suspend fun startStreaming(context: Context, csvFileName: String) {
         if (simulationJob?.isActive == true) {
-            Log.i("SimulationManager", "Simulation already running")
+            Log.w(TAG, "Simulation already running")
             return
         }
 
-        simulationJob = scope.launch {
-            try {
-                Log.i("SimulationManager", "Starting health data simulation")
-                if (EvaluationState.isEvaluationMode.value && evaluationModeStartSystemTime == null) {
-                    evaluationModeStartSystemTime = LocalDateTime.now()
-                    Log.i("SimulationManager", "Evaluation mode start system time: $evaluationModeStartSystemTime")
-                }
-                // Update simulation state
-                _simulationState.value = _simulationState.value.copy(isRunning = true)
+        Log.i(TAG, "===== Starting Simulation Pipeline =====")
 
-                // Load previous global state - this persists across app restarts
-                loadGlobalSimulationState(context)
+        // Reset accessibility flag
+        _isDataAccessible.value = false
 
-                Log.i("SimulationManager", "Reading CSV file: $csvFileName")
-                val allLines = context.assets.open(csvFileName).bufferedReader().readLines()
+        // Check if we need to reload data
+        val shouldReload = HistoricalDataManager.shouldReloadData(context)
 
-                if (allLines.size <= 1) {
-                    Log.e("SimulationManager", "CSV file has no data rows")
-                    return@launch
-                }
+        if (!shouldReload) {
+            Log.i(TAG, "✓ Historical data already exists, loading from database...")
 
-                Log.i("SimulationManager", "Successfully read ${allLines.size} lines from CSV")
-
-                val header = allLines.first()
-                dataLines = allLines.drop(1)
-
-                // Update total records count
-                _simulationState.value = _simulationState.value.copy(
-                    totalRecords = dataLines.size,
-                    currentIndex = currentIndex
-                )
-
-                val columnIndexMap = header.split(',')
-                    .mapIndexed { index, name -> name.trim() to index }.toMap()
-
-                val startTimeIndex = columnIndexMap["StartTime"] ?: run {
-                    Log.e("SimulationManager", "StartTime column not found in CSV")
-                    return@launch
-                }
-
-                val formatter = DateTimeFormatter.ofPattern("yyyy/MM/dd HH:mm:ss")
-
-                // Enhanced evaluation mode logic
-                val (targetDate, historicalStartDate, historicalEndDate) = if (EvaluationState.isEvaluationMode.value) {
-                    Triple(
-                        EvaluationState.EVALUATION_DATE,
-                        LocalDate.of(2023, 8, 1),
-                        LocalDate.of(2023, 8, 18)
-                    )
-                } else {
-                    Triple(LocalDate.now(), null, null)
-                }
-
-                // Always load historical data first in evaluation mode
-                if (EvaluationState.isEvaluationMode.value && historicalStartDate != null && historicalEndDate != null) {
-                    Log.i(
-                        "SimulationManager",
-                        "Starting background historical data loading for evaluation mode..."
-                    )
-
-                    // Launch historical data loading in background
-                    scope.launch {
-                        try {
-                            Log.i("SimulationManager", "Background historical data loading started")
-                            loadHistoricalData(
-                                context,
-                                allLines,
-                                historicalStartDate,
-                                historicalEndDate
-                            )
-                            Log.i(
-                                "SimulationManager",
-                                "Background historical data loading completed"
-                            )
-                            suspend fun initializeCumulativeValuesFromHistoricalData(context: Context) {
-                                if (!EvaluationState.isEvaluationMode.value) return
-
-                                try {
-                                    val archiveDao = ArchiveDatabase.getInstance(context).archiveRecordDao()
-                                    val boundarySystemTime = evaluationModeStartSystemTime ?: LocalDateTime.now()
-                                    val boundaryTimestamp = LocalDateTime.of(
-                                        EvaluationState.EVALUATION_DATE,
-                                        boundarySystemTime.toLocalTime()
-                                    ).atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
-
-                                    // Get the last historical record before the boundary
-                                    val dayStart = EvaluationState.EVALUATION_DATE.atStartOfDay(ZoneId.systemDefault())
-                                        .toInstant().toEpochMilli()
-
-                                    val historicalRecords = archiveDao.getRecordsBetween(dayStart, boundaryTimestamp)
-
-                                    if (historicalRecords.isNotEmpty()) {
-                                        val lastHistoricalRecord = historicalRecords.maxByOrNull { it.timestamp }
-
-                                        if (lastHistoricalRecord != null) {
-                                            cumulativeSteps = lastHistoricalRecord.stepCount
-                                            cumulativeEnergy = lastHistoricalRecord.activeEnergyBurned
-
-                                            Log.i("SimulationManager",
-                                                "Initialized cumulative values from historical data: " +
-                                                        "Steps=$cumulativeSteps, Energy=$cumulativeEnergy")
-                                        }
-                                    }
-                                } catch (e: Exception) {
-                                    Log.e("SimulationManager", "Error initializing from historical data", e)
-                                }
-                            }
-                        } catch (e: Exception) {
-                            Log.e(
-                                "SimulationManager",
-                                "Error in background historical data loading",
-                                e
-                            )
-                        }
-                    }
-
-                    // Don't wait for historical data - continue with main simulation
-                    Log.i(
-                        "SimulationManager",
-                        "Main simulation continuing while historical data loads in background"
-                    )
-                }
-                // Start UI streaming job for continuous updates
-                startUIStreamingJob()
-
-                // Handle synchronization for interrupted simulation
-                if (simulationStartTime > 0 && isPaused) {
-                    Log.i("SimulationManager", "Resuming interrupted simulation - synchronizing missed data")
-                    synchronizeInterruptedDataEnhanced(context, columnIndexMap, startTimeIndex, formatter, targetDate)
-                    isPaused = false
-                    _simulationState.value = _simulationState.value.copy(isPaused = false)
-                } else if (simulationStartTime == 0L) {
-                    // First time starting simulation
-                    simulationStartTime = System.currentTimeMillis()
-                    lastRecordTime = simulationStartTime
-
-                    // Find matching records for current day
-                    val bestMatchIdx = findBestMatchingRecord(dataLines, startTimeIndex, formatter, targetDate)
-                    currentIndex = if (bestMatchIdx >= 0) bestMatchIdx else 0
-
-                    // Initialize cumulative values from first record
-                    initializeCumulativeValues(columnIndexMap)
-
-                    saveGlobalSimulationState(context)
-                }
-
-                // Main simulation loop - runs until all data is processed
-                runContinuousSimulationLoop(context, columnIndexMap, startTimeIndex, formatter, targetDate)
-
-            } catch (e: IOException) {
-                Log.e("SimulationManager", "Error reading CSV file: $csvFileName", e)
-                _simulationState.value = _simulationState.value.copy(isRunning = false)
-            } catch (e: Exception) {
-                Log.e("SimulationManager", "Unexpected error in simulation", e)
-                _simulationState.value = _simulationState.value.copy(isRunning = false)
-            }
-        }
-    }
-
-    private fun startUIStreamingJob() {
-        uiStreamingJob?.cancel()
-        uiStreamingJob = scope.launch {
-            while (scope.isActive) {
-                // Process pending UI updates
-                synchronized(pendingUIUpdates) {
-                    if (pendingUIUpdates.isNotEmpty()) {
-                        val nextUpdate = pendingUIUpdates.removeAt(0)
-                        _healthDataStream.value = nextUpdate
-                        Log.v("SimulationManager", "Emitted pending UI update: HR=${nextUpdate.heartRate}")
-                    }
-                }
-                delay(100) // Check for updates every 100ms
-            }
-        }
-    }
-
-    private suspend fun synchronizeInterruptedDataEnhanced(
-        context: Context,
-        columnIndexMap: Map<String, Int>,
-        startTimeIndex: Int,
-        formatter: DateTimeFormatter,
-        targetDate: LocalDate
-    ) {
-        synchronizationJob = scope.launch {
-            val currentTime = System.currentTimeMillis()
-            val interruptedDuration = currentTime - lastPauseTime
-
-            Log.i("SimulationManager", "Enhanced synchronization: ${interruptedDuration}ms from index $currentIndex")
-
-            _synchronizationProgress.value = 0f
-
-            // Calculate how many records should have been processed during interruption
-            val estimatedRecordsPerMinute = 1.0
-            val missedMinutes = interruptedDuration / (60 * 1000)
-            val recordsToSync = (missedMinutes * estimatedRecordsPerMinute).toInt().coerceAtLeast(1)
-
-            Log.i("SimulationManager", "Synchronizing $recordsToSync missed records with UI updates")
-
-            val shortTermDb = HealthDatabase.getInstance(context)
-            val shortTermDao = shortTermDb.healthRecordDao()
-            val archiveDb = ArchiveDatabase.getInstance(context)
-            val archiveDao = archiveDb.archiveRecordDao()
-
-            // Emit all missed records with UI updates
-            val syncStartTime = lastPauseTime
-            val intervalMs = if (recordsToSync > 1) interruptedDuration / recordsToSync else interruptedDuration
-
-            repeat(recordsToSync) { i ->
-                if (currentIndex >= dataLines.size) {
-                    Log.i("SimulationManager", "Reached end of data during sync")
-                    return@repeat
-                }
-
-                val line = dataLines[currentIndex]
-                val values = line.split(',')
-                val timestamp = syncStartTime + (i * intervalMs)
-
-                try {
-                    val record = parseRecord(values, columnIndexMap, lastKnownRecord)
-
-                    // Update cumulative values
-                    cumulativeSteps = record.stepCount
-                    cumulativeEnergy = record.activeEnergyBurned
-                    lastKnownRecord = record
-
-                    // Queue for UI update
-                    synchronized(pendingUIUpdates) {
-                        pendingUIUpdates.add(record)
-                    }
-
-                    // Store in databases
-                    launch {
-                        try {
-                            shortTermDao.insert(
-                                HealthRecordEntity(
-                                    timestamp = timestamp,
-                                    heartRate = record.heartRate,
-                                    stepCount = record.stepCount,
-                                    activeEnergyBurned = record.activeEnergyBurned,
-                                    cyclePhase = record.cyclePhase,
-                                    cycleDay = record.cycleDay,
-                                    basalEnergyBurned = record.basalEnergyBurned,
-                                    vo2Max = record.vo2Max,
-                                    restingHeartRate = record.restingHeartRate,
-                                    basalBodyTemperature = record.basalBodyTemperature
-                                )
-                            )
-                        } catch (e: Exception) {
-                            Log.e("SimulationManager", "Failed to insert short-term record during sync", e)
-                        }
-                    }
-
-                    launch {
-                        try {
-                            archiveDao.insert(
-                                ArchiveRecordEntity(
-                                    timestamp = timestamp,
-                                    heartRate = record.heartRate,
-                                    stepCount = record.stepCount,
-                                    activeEnergyBurned = record.activeEnergyBurned,
-                                    basalEnergyBurned = record.basalEnergyBurned,
-                                    cyclePhase = record.cyclePhase,
-                                    cycleDay = record.cycleDay,
-                                    vo2Max = record.vo2Max,
-                                    restingHeartRate = record.restingHeartRate,
-                                    basalBodyTemperature = record.basalBodyTemperature
-                                )
-                            )
-                        } catch (e: Exception) {
-                            Log.e("SimulationManager", "Failed to insert archive record during sync", e)
-                        }
-                    }
-
-                    currentIndex++
-
-                    // Update progress
-                    val progress = (i + 1).toFloat() / recordsToSync
-                    _synchronizationProgress.value = progress
-                    _simulationState.value = _simulationState.value.copy(
-                        currentIndex = currentIndex,
-                        progressPercentage = (currentIndex.toFloat() / dataLines.size) * 100f
-                    )
-
-                    // Controlled delay to prevent system overload while maintaining UI responsiveness
-                    delay(50) // Faster than original 10ms but still controlled
-
-                } catch (e: Exception) {
-                    Log.e("SimulationManager", "Error synchronizing record at index $currentIndex", e)
-                    currentIndex++
-                }
+            // Show existing data info
+            val info = HistoricalDataManager.getHistoricalDataInfo(context)
+            info?.let {
+                Log.i(TAG, "  Loaded on: ${java.util.Date(it.loadTimestamp)}")
+                Log.i(TAG, "  Record count: ${it.recordCount}")
+                Log.i(TAG, "  Cutoff time: ${it.cutoffTime}")
+                Log.i(TAG, "  Was evaluation mode: ${it.wasEvaluationMode}")
             }
 
-            // Update timing
-            lastRecordTime = currentTime
-            totalPauseDuration += interruptedDuration
-            lastPauseTime = 0L
+            // Get database summary
+            val dbSummary = HistoricalDataManager.getDatabaseSummary(context)
+            Log.i(TAG, "  Archive records: ${dbSummary.archiveRecordCount}")
+            Log.i(TAG, "  Date range: ${java.util.Date(dbSummary.earliestTimestamp)} to ${java.util.Date(dbSummary.latestTimestamp)}")
 
-            saveGlobalSimulationState(context)
-            _synchronizationProgress.value = 1f
+            // Load latest snapshot from database
+            loadLatestSnapshotFromDatabase(context)
 
-            Log.i("SimulationManager", "Enhanced synchronization complete. Updated to index $currentIndex")
-        }
-
-        synchronizationJob?.join() // Wait for synchronization to complete
-    }
-
-    private suspend fun runContinuousSimulationLoop(
-        context: Context,
-        columnIndexMap: Map<String, Int>,
-        startTimeIndex: Int,
-        formatter: DateTimeFormatter,
-        targetDate: LocalDate
-    ) {
-        shortTermDb = HealthDatabase.getInstance(context)
-        shortTermDao = shortTermDb?.healthRecordDao()
-        archiveDb = ArchiveDatabase.getInstance(context)
-        archiveDao = archiveDb?.archiveRecordDao()
-        var previousRecordTime: LocalDateTime? = null
-
-        // Initialize simulation day
-        currentSimulationDay = if (EvaluationState.isEvaluationMode.value) {
-            targetDate.dayOfMonth
+            _historicalLoadingProgress.value = 1f
+            _isHistoricalLoadingComplete.value = true
         } else {
-            LocalDateTime.now().dayOfMonth
+            Log.i(TAG, "Loading historical data from CSV for first time...")
+
+            // Fresh load from CSV
+            loadHistoricalDataBlocking(context, csvFileName)
+
+            // Wait for completion
+            _isHistoricalLoadingComplete.first { it }
         }
 
-        Log.i("SimulationManager", "Starting simulation loop from index $currentIndex of ${dataLines.size} records")
+        // CRITICAL: Verify data is accessible before proceeding
+        waitForDataAccessibility(context)
 
-        while (scope.isActive && currentIndex < dataLines.size && !isSimulationComplete) {
-            // Handle pause state
-            if (isPaused) {
-                _simulationState.value = _simulationState.value.copy(isPaused = true)
-                delay(1000)
-                continue
-            }
+        Log.i(TAG, "✓ Historical data accessible and ready for UIs")
 
-            val line = dataLines[currentIndex]
-            val values = line.split(',')
+        // Start heartbeat to keep data fresh
+        startHeartbeat()
 
-            val currentRecordTime = try {
-                val csvTime = LocalDateTime.parse(values[startTimeIndex], formatter)
-                if (EvaluationState.isEvaluationMode.value) {
-                    LocalDateTime.of(LocalDateTime.now().toLocalDate(), csvTime.toLocalTime())
-                } else {
-                    csvTime.withYear(LocalDateTime.now().year)
-                        .withMonth(LocalDateTime.now().monthValue)
-                        .withDayOfMonth(LocalDateTime.now().dayOfMonth)
-                }
-            } catch (e: Exception) {
-                Log.e("SimulationManager", "Error parsing time at index $currentIndex", e)
-                currentIndex++
-                continue
-            }
-
-            // Handle day rollover
-            val recordDay = if (EvaluationState.isEvaluationMode.value) {
-                targetDate.dayOfMonth
-            } else {
-                currentRecordTime.dayOfMonth
-            }
-
-            if (recordDay != currentSimulationDay) {
-                currentSimulationDay = recordDay
-                Log.i("SimulationManager", "New day detected. Day: $currentSimulationDay")
-            }
-
-            // Calculate timing delay
-            val delayMillis = if (previousRecordTime == null) {
-                1000L // First record delay
-            } else {
-                val calculatedDelay = ChronoUnit.MILLIS.between(previousRecordTime, currentRecordTime)
-                calculatedDelay.coerceIn(100L, 60000L) // Between 100ms and 1 minute
-            }
-
-            delay(delayMillis)
-
-            if (scope.isActive && !isPaused) {
-                try {
-                    val newRecord = parseRecord(values, columnIndexMap, lastKnownRecord)
-
-                    // Update cumulative totals
-                    cumulativeSteps = newRecord.stepCount
-                    cumulativeEnergy = newRecord.activeEnergyBurned
-
-                    // Emit to stream for UI updates (immediate update)
-                    if (System.currentTimeMillis() - lastUiUpdate > uiUpdateThrottle) {
-                        _healthDataStream.value = newRecord
-                        lastUiUpdate = System.currentTimeMillis()
-                    }
-                    lastKnownRecord = newRecord
-                    previousRecordTime = currentRecordTime
-
-                    val timestamp = System.currentTimeMillis()
-                    lastRecordTime = timestamp
-
-                    // Update simulation state
-                    _simulationState.value = _simulationState.value.copy(
-                        currentIndex = currentIndex,
-                        progressPercentage = (currentIndex.toFloat() / dataLines.size) * 100f,
-                        lastUpdateTime = timestamp
-                    )
-
-               bufferRecordForInsertion(newRecord, timestamp)
-
-                    // Persist state periodically
-                    if (currentIndex % 10 == 0) {
-                        saveGlobalSimulationState(context)
-                    }
-
-                } catch (e: Exception) {
-                    Log.e("SimulationManager", "Error processing record at index $currentIndex", e)
-                }
-            }
-
-            currentIndex++
-        }
-
-        // Simulation complete
-        if (currentIndex >= dataLines.size) {
-            isSimulationComplete = true
-            _simulationState.value = _simulationState.value.copy(
-                isRunning = false,
-                progressPercentage = 100f
-            )
-            Log.i("SimulationManager", "Simulation completed - all ${dataLines.size} records processed")
-
-            // Final state save
-            saveGlobalSimulationState(context)
-
-            // Keep the stream alive for visualizations but stop processing
-            while (scope.isActive) {
-                delay(5000) // Keep alive but idle
-            }
-        }
-    }
-    private fun bufferRecordForInsertion(newRecord: HealthDataRecord, timestamp: Long) {
-        // Create both entity types from the same HealthDataRecord
-        val healthEntity = HealthRecordEntity(
-            timestamp = timestamp,
-            heartRate = newRecord.heartRate,
-            stepCount = newRecord.stepCount,
-            activeEnergyBurned = newRecord.activeEnergyBurned,
-            basalEnergyBurned = newRecord.basalEnergyBurned,
-            cyclePhase = newRecord.cyclePhase,
-            cycleDay = newRecord.cycleDay,
-            vo2Max = newRecord.vo2Max,
-            restingHeartRate = newRecord.restingHeartRate,
-            basalBodyTemperature = newRecord.basalBodyTemperature
-        )
-
-        val archiveEntity = ArchiveRecordEntity(
-            timestamp = timestamp,
-            heartRate = newRecord.heartRate,
-            stepCount = newRecord.stepCount,
-            activeEnergyBurned = newRecord.activeEnergyBurned,
-            basalEnergyBurned = newRecord.basalEnergyBurned,
-            cyclePhase = newRecord.cyclePhase,
-            cycleDay = newRecord.cycleDay,
-            vo2Max = newRecord.vo2Max,
-            restingHeartRate = newRecord.restingHeartRate,
-            basalBodyTemperature = newRecord.basalBodyTemperature
-        )
-
-        // Add to respective buffers
-        healthInsertBuffer.add(healthEntity)
-        archiveInsertBuffer.add(archiveEntity)
-
-        val timeSinceLastBatch = System.currentTimeMillis() - lastBatchInsert
-        val shouldFlushBySize = healthInsertBuffer.size >= batchSize
-        val shouldFlushByTime = timeSinceLastBatch > batchTimeoutMs
-        val shouldFlushByMemoryPressure = healthInsertBuffer.size > (batchSize * 2) // Emergency flush
-
-        if (shouldFlushBySize || shouldFlushByTime || shouldFlushByMemoryPressure) {
-            if (shouldFlushByMemoryPressure) {
-                Log.w("SimulationManager", "Emergency buffer flush due to memory pressure")
-            }
-            flushInsertBuffers()
-        }
-    }
-
-    private fun flushInsertBuffers() {
-        if (healthInsertBuffer.isEmpty() && archiveInsertBuffer.isEmpty()) return
-
-        scope.launch {
-            try {
-                // Batch insert to short-term database
-                if (healthInsertBuffer.isNotEmpty()) {
-                    shortTermDao?.insertBatch(healthInsertBuffer.toList())
-
-                    // Clean old records less frequently
-                    if (healthInsertBuffer.size >= batchSize) {
-                        val cutoff = System.currentTimeMillis() - TimeUnit.HOURS.toMillis(3)
-                        shortTermDao?.deleteOlderThan(cutoff)
-                    }
-                }
-
-                // Batch insert to archive database
-                if (archiveInsertBuffer.isNotEmpty()) {
-                    archiveDao?.insertBatch(archiveInsertBuffer.toList())
-                }
-
-                // Clear buffers and update timestamp
-                healthInsertBuffer.clear()
-                archiveInsertBuffer.clear()
-                lastBatchInsert = System.currentTimeMillis()
-
-            } catch (e: Exception) {
-                Log.e("SimulationManager", "Batch insert failed", e)
-                // Optionally retry or handle partial failure
-            }
-        }
-    }
-    // Enhanced pause/resume methods with proper state management
-    fun pauseSimulation(context: Context) {
-        if (!isPaused && !isSimulationComplete) {
-            isPaused = true
-            lastPauseTime = System.currentTimeMillis()
-            _simulationState.value = _simulationState.value.copy(isPaused = true)
-
-            scope.launch {
-                saveGlobalSimulationState(context)
-            }
-            Log.i("SimulationManager", "Simulation paused at $lastPauseTime")
-        }
-    }
-
-    fun resumeSimulation(context: Context) {
-        if (isPaused && !isSimulationComplete) {
-            Log.i("SimulationManager", "Resuming simulation from pause state")
-            isPaused = false
-            _simulationState.value = _simulationState.value.copy(isPaused = false)
-
-            scope.launch {
-                saveGlobalSimulationState(context)
-            }
-        }
-    }
-
-    fun stopStreaming() {
-        flushInsertBuffers()
-        simulationJob?.cancel()
-        synchronizationJob?.cancel()
-        uiStreamingJob?.cancel()
-        simulationJob = null
-        synchronizationJob = null
-        uiStreamingJob = null
-        isPaused = false
-
-        // Clear pending updates
-        synchronized(pendingUIUpdates) {
-            pendingUIUpdates.clear()
-        }
-
-        _simulationState.value = SimulationState()
-        _synchronizationProgress.value = 0f
-
-        Log.i("SimulationManager", "Simulation stopped")
-    }
-
-    fun resetSimulation(context: Context) {
-        stopStreaming()
-
-        scope.launch {
-            context.simulationDataStore.edit { prefs ->
-                prefs.clear()
-            }
-
-            simulationStartTime = 0L
-            lastPauseTime = 0L
-            totalPauseDuration = 0L
-            currentIndex = 0
-            isPaused = false
-            lastRecordTime = 0L
-            cumulativeSteps = 0
-            cumulativeEnergy = 0.0
-            isSimulationComplete = false
-
-            _simulationState.value = SimulationState()
-            _healthDataStream.value = HealthDataRecord()
-            _synchronizationProgress.value = 0f
-
-            Log.i("SimulationManager", "Simulation reset to initial state")
-        }
-    }
-    fun isHistoricalDataLoaded(): Boolean = historicalDataLoadComplete
-    fun getHistoricalLoadingProgress(): Float = _historicalLoadingProgress.value
-
-    // Public getters for enhanced state monitoring
-    fun getCumulativeSteps(): Int = cumulativeSteps
-    fun getCumulativeEnergy(): Double = cumulativeEnergy
-    fun isComplete(): Boolean = isSimulationComplete
-    fun getCurrentProgress(): Pair<Int, Int> = Pair(currentIndex, dataLines.size)
-    fun isPaused(): Boolean = isPaused
-    fun isRunning(): Boolean = simulationJob?.isActive == true
-
-    // Remaining helper methods stay the same...
-    private suspend fun loadGlobalSimulationState(context: Context) {
-        context.simulationDataStore.data.first().let { prefs ->
-            simulationStartTime = prefs[KEY_SIMULATION_START_TIME] ?: 0L
-            lastPauseTime = prefs[KEY_LAST_PAUSE_TIME] ?: 0L
-            totalPauseDuration = prefs[KEY_TOTAL_PAUSE_DURATION] ?: 0L
-            currentIndex = prefs[KEY_INDEX] ?: 0
-            isPaused = prefs[KEY_IS_PAUSED] ?: false
-            lastRecordTime = prefs[KEY_LAST_RECORD_TIME] ?: 0L
-            cumulativeSteps = prefs[KEY_CUMULATIVE_STEPS] ?: 0
-            cumulativeEnergy = (prefs[KEY_CUMULATIVE_ENERGY] ?: 0L) / 1000.0
-
-            Log.i("SimulationManager",
-                "Loaded global state - Start: $simulationStartTime, Index: $currentIndex, " +
-                        "Paused: $isPaused, LastRecord: $lastRecordTime, Steps: $cumulativeSteps"
-            )
-        }
-    }
-
-    private suspend fun saveGlobalSimulationState(context: Context) {
-        context.simulationDataStore.edit { prefs ->
-            prefs[KEY_SIMULATION_START_TIME] = simulationStartTime
-            prefs[KEY_LAST_PAUSE_TIME] = lastPauseTime
-            prefs[KEY_TOTAL_PAUSE_DURATION] = totalPauseDuration
-            prefs[KEY_INDEX] = currentIndex
-            prefs[KEY_IS_PAUSED] = isPaused
-            prefs[KEY_LAST_RECORD_TIME] = lastRecordTime
-            prefs[KEY_CUMULATIVE_STEPS] = cumulativeSteps
-            prefs[KEY_CUMULATIVE_ENERGY] = (cumulativeEnergy * 1000).toLong()
-        }
-    }
-
-    private fun initializeCumulativeValues(columnIndexMap: Map<String, Int>) {
-        if (currentIndex < dataLines.size) {
-            try {
-                val initialLine = dataLines[currentIndex]
-                val initialValues = initialLine.split(',')
-                val initialRecord = parseRecord(initialValues, columnIndexMap, HealthDataRecord())
-
-                cumulativeSteps = initialRecord.stepCount
-                cumulativeEnergy = initialRecord.activeEnergyBurned
-                lastKnownRecord = initialRecord
-
-                Log.i("SimulationManager", "Initialized with steps: $cumulativeSteps, energy: $cumulativeEnergy")
-            } catch (e: Exception) {
-                Log.e("SimulationManager", "Failed to initialize cumulative values", e)
-            }
-        }
-    }
-
-    private fun findBestMatchingRecord(
-        dataLines: List<String>,
-        startTimeIndex: Int,
-        formatter: DateTimeFormatter,
-        targetDate: LocalDate
-    ): Int {
-        val systemNow = LocalDateTime.now()
-        var bestMatchIdx = -1
-        var closestTimeDiff = Long.MAX_VALUE
-
-        dataLines.forEachIndexed { idx, line ->
-            val parts = line.split(',')
-            try {
-                val originalRecordTime = LocalDateTime.parse(parts[startTimeIndex], formatter)
-
-                if (originalRecordTime.toLocalDate().isEqual(targetDate)) {
-                    val timeDiff = kotlin.math.abs(
-                        ChronoUnit.MINUTES.between(originalRecordTime.toLocalTime(), systemNow.toLocalTime())
-                    )
-
-                    if (timeDiff < closestTimeDiff) {
-                        closestTimeDiff = timeDiff
-                        bestMatchIdx = idx
-                    }
-                }
-            } catch (e: Exception) {
-                // Skip invalid records
-            }
-        }
-
-        return bestMatchIdx
-    }
-
-    // Key fixes needed in SimulationManager.kt for proper evaluation mode step analytics
-
-    // 1. Fix in loadHistoricalData method - ensure proper timestamp conversion
-    // Replace the loadHistoricalData method in SimulationManager.kt
-    private suspend fun loadHistoricalData(
-        context: Context,
-        allLines: List<String>,
-        startDate: LocalDate,
-        endDate: LocalDate
-    ) {
-        Log.i("SimulationManager", "Loading historical data from $startDate to $endDate")
-        _historicalLoadingProgress.value = 0f
-        _isHistoricalLoadingComplete.value = false
-
+        // Start workout monitoring
         try {
+            WorkoutSimulationManager.startMonitoring(context, "P102-Workout_Data.csv")
+            Log.i(TAG, "✓ Workout countdown triggered")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start workout monitoring", e)
+        }
+
+        // Start live simulation
+        Log.i(TAG, "✓ Starting live simulation...")
+        simulationJob = scope.launch {
+            runLiveSimulation(context, csvFileName)
+        }
+    }
+
+    /**
+     * Load latest snapshot from database (for subsequent launches)
+     * This is much faster than loading from CSV
+     */
+    private suspend fun loadLatestSnapshotFromDatabase(context: Context) {
+        try {
+            Log.i(TAG, "Loading snapshot from database...")
+
+            val cutoffTime = if (EvaluationState.isEvaluationMode.value) {
+                val evalDate = EvaluationState.EVALUATION_DATE
+                val currentTime = LocalDateTime.now()
+                LocalDateTime.of(evalDate, currentTime.toLocalTime())
+            } else {
+                LocalDateTime.now()
+            }
+
+            val cutoffTimestamp = cutoffTime.atZone(ZoneId.systemDefault())
+                .toInstant()
+                .toEpochMilli()
+
+            Log.i(TAG, "  Cutoff time: $cutoffTime")
+            Log.i(TAG, "  Cutoff timestamp: $cutoffTimestamp")
+
+            // Get records around cutoff time (within 5 minutes before)
+            val dao = ArchiveDatabase.getInstance(context).archiveRecordDao()
+            val records = dao.getRecordsBetween(
+                cutoffTimestamp - (5 * 60 * 1000), // 5 minutes before
+                cutoffTimestamp
+            )
+
+            Log.i(TAG, "  Found ${records.size} records near cutoff")
+
+            if (records.isEmpty()) {
+                Log.w(TAG, "⚠ No records found near cutoff time, trying broader range...")
+
+                // Try getting any records up to cutoff
+                val allRecords = dao.getRecordsBetween(0, cutoffTimestamp)
+
+                if (allRecords.isEmpty()) {
+                    Log.e(TAG, "❌ No historical records found in database!")
+                    return
+                }
+
+                val latestRecord = allRecords.maxByOrNull { it.timestamp }!!
+                Log.i(TAG, "  Using latest available record from ${java.util.Date(latestRecord.timestamp)}")
+
+                updateSnapshotFromRecord(latestRecord)
+                return
+            }
+
+            // Get latest record from the set
+            val latestRecord = records.maxByOrNull { it.timestamp }!!
+            Log.i(TAG, "  Latest record timestamp: ${java.util.Date(latestRecord.timestamp)}")
+
+            updateSnapshotFromRecord(latestRecord)
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Error loading snapshot from database", e)
+            e.printStackTrace()
+        }
+    }
+
+    /**
+     * Helper to update snapshot from a database record
+     */
+    private suspend fun updateSnapshotFromRecord(record: ArchiveRecordEntity) {
+        // Update tracking variables
+        cumulativeSteps = record.stepCount
+        cumulativeEnergy = record.activeEnergyBurned
+        lastKnownCyclePhase = record.cyclePhase
+        lastKnownCycleDay = record.cycleDay
+
+        // Emit snapshot
+        val snapshot = HealthDataSnapshot(
+            timestamp = System.currentTimeMillis(),
+            heartRate = record.heartRate,
+            vo2Max = record.vo2Max,
+            restingHeartRate = record.restingHeartRate,
+            basalBodyTemperature = record.basalBodyTemperature,
+            basalEnergyBurned = record.basalEnergyBurned,
+            cyclePhase = lastKnownCyclePhase,
+            cycleDay = lastKnownCycleDay,
+            cumulativeSteps = cumulativeSteps,
+            cumulativeEnergyBurned = cumulativeEnergy,
+            isHistoricalDataLoaded = true,
+            dataSource = DataSource.DATABASE
+        )
+
+        HealthDataStreamManager.emitData(snapshot)
+
+        Log.i(TAG, "✓ Loaded snapshot from database:")
+        Log.i(TAG, "  Steps: $cumulativeSteps")
+        Log.i(TAG, "  Energy: ${cumulativeEnergy.toInt()} kcal")
+        Log.i(TAG, "  HR: ${record.heartRate.toInt()} bpm")
+        Log.i(TAG, "  Cycle: $lastKnownCyclePhase Day $lastKnownCycleDay")
+    }
+
+    /**
+     * Wait for data to be truly accessible to UIs
+     * This prevents activities from launching before data is ready
+     */
+    private suspend fun waitForDataAccessibility(context: Context) {
+        Log.i(TAG, "Verifying data accessibility for UIs...")
+
+        var attempts = 0
+
+        while (attempts < MAX_VERIFICATION_ATTEMPTS) {
+            delay(VERIFICATION_DELAY_MS)
+
+            // Check 1: HealthDataStreamManager has valid data
+            val snapshot = HealthDataStreamManager.getCurrentSnapshot()
+
+            val hasValidSnapshot = snapshot.isHistoricalDataLoaded &&
+                    (snapshot.cumulativeSteps > 0 || snapshot.heartRate > 0)
+
+            Log.d(TAG, "  Check 1 - Snapshot valid: $hasValidSnapshot " +
+                    "(Steps=${snapshot.cumulativeSteps}, HR=${snapshot.heartRate.toInt()})")
+
+            // Check 2: Repository can fetch data
+            val hasDbData = try {
+                val latestRecord = repository.getLatestRecord()
+                latestRecord != null && latestRecord.timestamp > 0
+            } catch (e: Exception) {
+                Log.e(TAG, "  Check 2 - Repository error: ${e.message}")
+                false
+            }
+
+            Log.d(TAG, "  Check 2 - Repository accessible: $hasDbData")
+
+            // Check 3: Archive database has records
+            val hasArchiveData = try {
+                val dao = ArchiveDatabase.getInstance(context).archiveRecordDao()
+                val count = dao.getAll().size
+                Log.d(TAG, "  Check 3 - Archive has $count records")
+                count > 0
+            } catch (e: Exception) {
+                Log.e(TAG, "  Check 3 - Archive error: ${e.message}")
+                false
+            }
+
+            // All checks must pass
+            if (hasValidSnapshot && hasDbData && hasArchiveData) {
+                _isDataAccessible.value = true
+                Log.i(TAG, "✓ Data accessibility verified after ${attempts + 1} attempts")
+                Log.i(TAG, "  Final state: Steps=${snapshot.cumulativeSteps}, " +
+                        "HR=${snapshot.heartRate.toInt()}, " +
+                        "Cycle=${snapshot.cyclePhase} D${snapshot.cycleDay}")
+                return
+            }
+
+            attempts++
+            Log.d(TAG, "  Waiting for data accessibility... attempt $attempts/$MAX_VERIFICATION_ATTEMPTS")
+        }
+
+        Log.w(TAG, "⚠ Data accessibility verification timed out - proceeding anyway")
+        _isDataAccessible.value = true // Proceed to prevent deadlock
+    }
+
+    /**
+     * Load historical data from CSV (first-time load only)
+     */
+    private suspend fun loadHistoricalDataBlocking(context: Context, csvFileName: String) {
+        try {
+            Log.i(TAG, "Loading historical data from $csvFileName...")
+
+            val allLines = context.assets.open(csvFileName).bufferedReader().readLines()
             val header = allLines.first()
             val dataLines = allLines.drop(1)
+
             val columnIndexMap = header.split(',')
-                .mapIndexed { index, name -> name.trim() to index }.toMap()
+                .mapIndexed { index, name -> name.trim() to index }
+                .toMap()
+
+            Log.i(TAG, "CSV Columns detected: ${columnIndexMap.keys}")
+
+            val startTimeIndex = columnIndexMap["StartTime"]
+                ?: throw IllegalStateException("StartTime column not found in CSV")
+
+            val formatter = DateTimeFormatter.ofPattern("yyyy/MM/dd HH:mm:ss")
+
+            val cutoffTime = if (EvaluationState.isEvaluationMode.value) {
+                val evalDate = EvaluationState.EVALUATION_DATE
+                val currentTime = LocalDateTime.now()
+                LocalDateTime.of(evalDate, currentTime.toLocalTime())
+            } else {
+                LocalDateTime.now()
+            }
+
+            Log.i(TAG, "Historical cutoff time: $cutoffTime")
+            Log.i(TAG, "Evaluation mode: ${EvaluationState.isEvaluationMode.value}")
+
+            // Reset cumulative trackers
+            cumulativeSteps = 0
+            cumulativeEnergy = 0.0
+            lastKnownCyclePhase = ""
+            lastKnownCycleDay = 0
+
+            val historicalRecords = dataLines.mapIndexedNotNull { index, line ->
+                try {
+                    val values = line.split(',')
+                    val recordTime = LocalDateTime.parse(values[startTimeIndex].trim(), formatter)
+
+                    if (recordTime.isBefore(cutoffTime) || recordTime.isEqual(cutoffTime)) {
+                        val entity = parseRecordToEntity(values, columnIndexMap, recordTime)
+
+                        // Track maximum cumulative values
+                        if (entity.stepCount > cumulativeSteps) {
+                            cumulativeSteps = entity.stepCount
+                        }
+                        if (entity.activeEnergyBurned > cumulativeEnergy) {
+                            cumulativeEnergy = entity.activeEnergyBurned
+                        }
+
+                        // Track cycle info
+                        if (entity.cyclePhase.isNotEmpty()) {
+                            lastKnownCyclePhase = entity.cyclePhase
+                            lastKnownCycleDay = entity.cycleDay
+                        }
+
+                        entity
+                    } else null
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error parsing line $index: $line", e)
+                    null
+                }
+            }
+
+            Log.i(TAG, "Parsed ${historicalRecords.size} historical records")
+            Log.i(TAG, "Final cumulative values: Steps=$cumulativeSteps, Energy=${cumulativeEnergy.toInt()}")
+            Log.i(TAG, "Final cycle: $lastKnownCyclePhase Day $lastKnownCycleDay")
+
+            if (historicalRecords.isEmpty()) {
+                Log.w(TAG, "❌ No historical records found!")
+                _historicalLoadingProgress.value = 1f
+                _isHistoricalLoadingComplete.value = true
+                return
+            }
+
+            // Sort by timestamp
+            val sortedRecords = historicalRecords.sortedBy { it.timestamp }
+
+            // Batch insert with progress updates
+            val batchSize = 100
+            val batches = sortedRecords.chunked(batchSize)
+
+            Log.i(TAG, "Inserting ${batches.size} batches into database...")
+
+            batches.forEachIndexed { batchIndex, batch ->
+                repository.insertBatch(batch)
+
+                // Emit snapshot periodically
+                if (batchIndex % 5 == 0 || batchIndex == batches.size - 1) {
+                    val lastRecordInBatch = batch.last()
+
+                    val snapshot = HealthDataSnapshot(
+                        timestamp = lastRecordInBatch.timestamp,
+                        heartRate = lastRecordInBatch.heartRate,
+                        vo2Max = lastRecordInBatch.vo2Max,
+                        restingHeartRate = lastRecordInBatch.restingHeartRate,
+                        basalBodyTemperature = lastRecordInBatch.basalBodyTemperature,
+                        basalEnergyBurned = lastRecordInBatch.basalEnergyBurned,
+                        cyclePhase = lastKnownCyclePhase,
+                        cycleDay = lastKnownCycleDay,
+                        cumulativeSteps = cumulativeSteps,
+                        cumulativeEnergyBurned = cumulativeEnergy,
+                        isHistoricalDataLoaded = batchIndex == batches.size - 1,
+                        dataSource = DataSource.HISTORICAL
+                    )
+
+                    HealthDataStreamManager.emitData(snapshot)
+
+                    Log.d(TAG, "Batch $batchIndex/${batches.size} complete, emitted snapshot")
+                }
+
+                val progress = ((batchIndex + 1).toFloat() / batches.size)
+                _historicalLoadingProgress.value = progress
+
+                if (batchIndex % 10 == 0) {
+                    Log.d(TAG, "Progress: ${(progress * 100).toInt()}%")
+                }
+            }
+
+            // Mark as loaded in DataStore
+            HistoricalDataManager.markHistoricalDataLoaded(
+                context = context,
+                cutoffTime = cutoffTime,
+                recordCount = historicalRecords.size.toLong(),
+                isEvaluationMode = EvaluationState.isEvaluationMode.value
+            )
+
+            _historicalLoadingProgress.value = 1f
+            _isHistoricalLoadingComplete.value = true
+
+            Log.i(TAG, "✓ Historical data load complete and persisted!")
+            Log.i(TAG, "  Next launch will load from database (much faster)")
+
+        } catch (e: Exception) {
+            Log.e(TAG, "CRITICAL: Failed to load historical data", e)
+            e.printStackTrace()
+            _isHistoricalLoadingComplete.value = true
+        }
+    }
+
+    /**
+     * Heartbeat to keep data fresh
+     */
+    private fun startHeartbeat() {
+        heartbeatJob?.cancel()
+        heartbeatJob = scope.launch {
+            while (isActive && _simulationState.value.isRunning) {
+                try {
+                    delay(HEARTBEAT_INTERVAL_MS)
+
+                    val currentSnapshot = HealthDataStreamManager.getCurrentSnapshot()
+                    val heartbeatSnapshot = currentSnapshot.copy(
+                        timestamp = System.currentTimeMillis()
+                    )
+
+                    HealthDataStreamManager.emitData(heartbeatSnapshot)
+
+                    Log.v(TAG, "Heartbeat: Steps=${heartbeatSnapshot.cumulativeSteps}, " +
+                            "HR=${heartbeatSnapshot.heartRate.toInt()}, " +
+                            "Cycle=${heartbeatSnapshot.cyclePhase} D${heartbeatSnapshot.cycleDay}")
+
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error in heartbeat", e)
+                }
+            }
+        }
+        Log.i(TAG, "✓ Heartbeat started (${HEARTBEAT_INTERVAL_MS}ms interval)")
+    }
+
+    /**
+     * Run live simulation (after historical data)
+     */
+    private suspend fun runLiveSimulation(context: Context, csvFileName: String) {
+        try {
+            Log.i(TAG, "Starting live simulation loop...")
+
+            val allLines = context.assets.open(csvFileName).bufferedReader().readLines()
+            val header = allLines.first()
+            val dataLines = allLines.drop(1)
+
+            val columnIndexMap = header.split(',')
+                .mapIndexed { index, name -> name.trim() to index }
+                .toMap()
+
             val startTimeIndex = columnIndexMap["StartTime"] ?: return
             val formatter = DateTimeFormatter.ofPattern("yyyy/MM/dd HH:mm:ss")
 
-            val archiveDb = ArchiveDatabase.getInstance(context)
-            val archiveDao = archiveDb.archiveRecordDao()
+            val cutoffTime = if (EvaluationState.isEvaluationMode.value) {
+                val evalDate = EvaluationState.EVALUATION_DATE
+                val currentTime = LocalDateTime.now()
+                LocalDateTime.of(evalDate, currentTime.toLocalTime())
+            } else {
+                LocalDateTime.now()
+            }
 
-            // CRITICAL: Use system time at simulation start as the boundary
-            val boundarySystemTime = evaluationModeStartSystemTime ?: LocalDateTime.now()
-            val boundaryTime = LocalDateTime.of(EvaluationState.EVALUATION_DATE, boundarySystemTime.toLocalTime())
-
-            Log.i("SimulationManager", "Historical boundary time: $boundaryTime (system time at start: $boundarySystemTime)")
-
-            // Pre-filter data for historical records only
-            val relevantRecords = dataLines.mapNotNull { line ->
+            // Filter live records (after cutoff)
+            val liveRecords = dataLines.mapNotNull { line ->
                 try {
                     val values = line.split(',')
-                    val recordTime = LocalDateTime.parse(values[startTimeIndex], formatter)
-                    val recordDate = recordTime.toLocalDate()
+                    val recordTime = LocalDateTime.parse(values[startTimeIndex].trim(), formatter)
 
-                    // Check if record is within date range AND before boundary time
-                    val isWithinDateRange = !recordDate.isBefore(startDate) && !recordDate.isAfter(endDate)
-
-                    // For evaluation date (2023-08-19), only include records before the boundary time
-                    val isHistorical = if (recordDate.isEqual(EvaluationState.EVALUATION_DATE)) {
-                        recordTime.toLocalTime().isBefore(boundaryTime.toLocalTime())
-                    } else {
-                        recordDate.isBefore(EvaluationState.EVALUATION_DATE)
-                    }
-
-                    if (isWithinDateRange && isHistorical) {
-                        val record = parseRecord(values, columnIndexMap, HealthDataRecord())
-
-                        // Map to evaluation year while preserving original time
-                        val historicalTimestamp = LocalDateTime.of(recordDate, recordTime.toLocalTime())
-                            .atZone(ZoneId.systemDefault())
-                            .toInstant()
-                            .toEpochMilli()
-
-                        ArchiveRecordEntity(
-                            timestamp = historicalTimestamp,
-                            heartRate = record.heartRate,
-                            stepCount = record.stepCount,
-                            activeEnergyBurned = record.activeEnergyBurned,
-                            basalEnergyBurned = record.basalEnergyBurned,
-                            cyclePhase = record.cyclePhase,
-                            cycleDay = record.cycleDay,
-                            vo2Max = record.vo2Max,
-                            restingHeartRate = record.restingHeartRate,
-                            basalBodyTemperature = record.basalBodyTemperature
-                        )
-                    } else {
-                        null
-                    }
+                    if (recordTime.isAfter(cutoffTime)) {
+                        Pair(values, recordTime)
+                    } else null
                 } catch (e: Exception) {
                     null
                 }
             }
 
-            Log.i("SimulationManager", "Found ${relevantRecords.size} historical records (before $boundaryTime)")
+            Log.i(TAG, "Live simulation: ${liveRecords.size} records to stream")
 
-            if (relevantRecords.isNotEmpty()) {
-                val batchSize = 500
-                var insertedCount = 0
+            _simulationState.value = SimulationState(
+                isRunning = true,
+                isPaused = false,
+                totalRecords = liveRecords.size
+            )
 
-                relevantRecords.chunked(batchSize).forEach { batch ->
-                    try {
-                        archiveDao.insertBatch(batch)
-                        insertedCount += batch.size
+            var previousTime: LocalDateTime? = null
 
-                        _historicalLoadingProgress.value = insertedCount.toFloat() / relevantRecords.size
-
-                        delay(10)
-                    } catch (e: Exception) {
-                        Log.e("SimulationManager", "Error inserting batch: ${e.message}")
-                    }
+            liveRecords.forEachIndexed { index, (values, recordTime) ->
+                // Check pause state
+                while (_simulationState.value.isPaused) {
+                    delay(1000)
                 }
 
-                historicalDataLoadComplete = true
-                _isHistoricalLoadingComplete.value = true
-                Log.i("SimulationManager", "Successfully loaded $insertedCount historical records")
-            } else {
-                historicalDataLoadComplete = true
-                _isHistoricalLoadingComplete.value = true
+                // Check if stopped
+                if (!_simulationState.value.isRunning) {
+                    Log.i(TAG, "Simulation stopped")
+                    return@runLiveSimulation
+                }
+
+                // Calculate delay
+                val delayMs = if (previousTime != null) {
+                    ChronoUnit.MILLIS.between(previousTime, recordTime)
+                        .coerceIn(100L, 60000L)
+                } else {
+                    1000L
+                }
+
+                delay(delayMs)
+
+                // Parse record
+                val record = parseHealthDataRecord(values, columnIndexMap)
+
+                // Update cumulative values (take max)
+                if (record.stepCount > cumulativeSteps) {
+                    cumulativeSteps = record.stepCount
+                }
+                if (record.activeEnergyBurned > cumulativeEnergy) {
+                    cumulativeEnergy = record.activeEnergyBurned
+                }
+
+                if (record.cyclePhase.isNotEmpty()) {
+                    lastKnownCyclePhase = record.cyclePhase
+                    lastKnownCycleDay = record.cycleDay
+                }
+
+                val snapshot = HealthDataSnapshot(
+                    timestamp = System.currentTimeMillis(),
+                    heartRate = record.heartRate,
+                    vo2Max = record.vo2Max,
+                    restingHeartRate = record.restingHeartRate,
+                    basalBodyTemperature = record.basalBodyTemperature,
+                    basalEnergyBurned = record.basalEnergyBurned,
+                    cyclePhase = lastKnownCyclePhase,
+                    cycleDay = lastKnownCycleDay,
+                    cumulativeSteps = cumulativeSteps,
+                    cumulativeEnergyBurned = cumulativeEnergy,
+                    isHistoricalDataLoaded = true,
+                    dataSource = DataSource.SIMULATION
+                )
+
+                HealthDataStreamManager.emitData(snapshot)
+
+                val entity = HealthRecordEntity(
+                    timestamp = snapshot.timestamp,
+                    heartRate = snapshot.heartRate,
+                    stepCount = snapshot.cumulativeSteps,
+                    activeEnergyBurned = snapshot.cumulativeEnergyBurned,
+                    basalEnergyBurned = snapshot.basalEnergyBurned,
+                    cyclePhase = snapshot.cyclePhase,
+                    cycleDay = snapshot.cycleDay,
+                    vo2Max = snapshot.vo2Max,
+                    restingHeartRate = snapshot.restingHeartRate,
+                    basalBodyTemperature = snapshot.basalBodyTemperature
+                )
+                repository.insertHealthRecord(entity)
+
+                _simulationState.value = _simulationState.value.copy(
+                    currentIndex = index,
+                    lastUpdateTime = System.currentTimeMillis()
+                )
+
+                previousTime = recordTime
+
+                if (index % 100 == 0) {
+                    Log.d(TAG, "Live simulation progress: $index/${liveRecords.size}")
+                }
             }
+
+            Log.i(TAG, "Live simulation complete")
+            _simulationState.value = _simulationState.value.copy(isRunning = false)
 
         } catch (e: Exception) {
-            Log.e("SimulationManager", "Error loading historical data", e)
-            _isHistoricalLoadingComplete.value = true
+            Log.e(TAG, "Error in live simulation", e)
+            e.printStackTrace()
+            _simulationState.value = _simulationState.value.copy(isRunning = false)
         }
     }
 
-    // 2. Enhanced method to get daily step aggregates for step analytics
-    suspend fun getDailyStepDataForRange(context: Context, startDate: LocalDate, endDate: LocalDate): List<Pair<LocalDate, Int>> {
-        return withContext(Dispatchers.IO) {
-            try {
-                val archiveDao = ArchiveDatabase.getInstance(context).archiveRecordDao()
-                val dailySteps = mutableListOf<Pair<LocalDate, Int>>()
-
-                var currentDate = startDate
-                while (!currentDate.isAfter(endDate)) {
-                    val dayStart = currentDate.atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
-                    val dayEnd = currentDate.plusDays(1).atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
-
-                    val dayRecords = archiveDao.getRecordsBetween(dayStart, dayEnd)
-
-                    val dailyStepCount = if (dayRecords.isNotEmpty()) {
-                        // Get the maximum step count for the day (assuming cumulative steps)
-                        val sortedRecords = dayRecords.sortedBy { it.timestamp }
-                        val maxSteps = sortedRecords.maxOfOrNull { it.stepCount } ?: 0
-
-                        // Alternative: Calculate daily increment
-                        val firstRecord = sortedRecords.first()
-                        val lastRecord = sortedRecords.last()
-                        val increment = lastRecord.stepCount - firstRecord.stepCount
-
-                        // Use whichever method makes sense for your data structure
-                        maxOf(maxSteps, increment, lastRecord.stepCount)
-                    } else {
-                        0
-                    }
-
-                    dailySteps.add(Pair(currentDate, dailyStepCount))
-                    Log.d("SimulationManager", "Daily steps for $currentDate: $dailyStepCount")
-
-                    currentDate = currentDate.plusDays(1)
-                }
-
-                dailySteps
-            } catch (e: Exception) {
-                Log.e("SimulationManager", "Error getting daily step data", e)
-                emptyList()
-            }
-        }
+    fun stopStreaming() {
+        simulationJob?.cancel()
+        heartbeatJob?.cancel()
+        simulationJob = null
+        heartbeatJob = null
+        _simulationState.value = SimulationState()
+        _isDataAccessible.value = false
+        Log.i(TAG, "Simulation and heartbeat stopped")
     }
 
-    // 3. Enhanced method to verify evaluation mode data integrity
-    suspend fun verifyEvaluationModeData(context: Context): Boolean {
-        return withContext(Dispatchers.IO) {
-            try {
-                val archiveDao = ArchiveDatabase.getInstance(context).archiveRecordDao()
-
-                // Check if we have data for the historical range
-                val historicalStartTimestamp = EvaluationState.HISTORICAL_START_DATE
-                    .atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
-                val historicalEndTimestamp = EvaluationState.HISTORICAL_END_DATE
-                    .plusDays(1).atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
-
-                val historicalRecords = archiveDao.getRecordsBetween(historicalStartTimestamp, historicalEndTimestamp)
-
-                Log.i("SimulationManager", "Evaluation mode data verification:")
-                Log.i("SimulationManager", "Historical records found: ${historicalRecords.size}")
-                Log.i("SimulationManager", "Date range: ${EvaluationState.HISTORICAL_START_DATE} to ${EvaluationState.HISTORICAL_END_DATE}")
-
-                // Verify we have data for each day
-                val daysWithData = historicalRecords
-                    .groupBy { record ->
-                        val instant = java.time.Instant.ofEpochMilli(record.timestamp)
-                        instant.atZone(ZoneId.systemDefault()).toLocalDate()
-                    }
-                    .keys
-                    .sorted()
-
-                Log.i("SimulationManager", "Days with historical data: $daysWithData")
-
-                val expectedDays = ChronoUnit.DAYS.between(
-                    EvaluationState.HISTORICAL_START_DATE,
-                    EvaluationState.HISTORICAL_END_DATE.plusDays(1)
-                ).toInt()
-
-                val hasCompleteData = daysWithData.size >= (expectedDays * 0.8) // At least 80% coverage
-
-                Log.i("SimulationManager", "Expected days: $expectedDays, Got days: ${daysWithData.size}, Complete: $hasCompleteData")
-
-                hasCompleteData
-
-            } catch (e: Exception) {
-                Log.e("SimulationManager", "Error verifying evaluation mode data", e)
-                false
-            }
-        }
+    fun pauseSimulation() {
+        _simulationState.value = _simulationState.value.copy(isPaused = true)
+        Log.i(TAG, "Simulation paused")
     }
 
-    private fun parseRecord(
+    fun resumeSimulation() {
+        _simulationState.value = _simulationState.value.copy(isPaused = false)
+        Log.i(TAG, "Simulation resumed")
+    }
+
+    /**
+     * Parse CSV record to HealthRecordEntity with proper null handling
+     */
+    private fun parseRecordToEntity(
         values: List<String>,
         columnIndexMap: Map<String, Int>,
-        lastRecord: HealthDataRecord
-    ): HealthDataRecord {
+        recordTime: LocalDateTime
+    ): HealthRecordEntity {
+        val timestamp = recordTime.atZone(ZoneId.systemDefault())
+            .toInstant()
+            .toEpochMilli()
 
-        return try {
-            val hrIndex = columnIndexMap["HeartRate"]
-            val stepsIndex = columnIndexMap["StepCount"]
-            val activeEnergyIndex = columnIndexMap["ActiveEnergyBurned"]
-            val basalEnergyIndex = columnIndexMap["BasalEnergyBurned"]
-            val cyclePhaseIndex = columnIndexMap["MenstrualCyclePhase"]
-            val cycleDayIndex = columnIndexMap["MenstrualCycle Day"]
-            val vo2MaxIndex = columnIndexMap["VO2Max"]
-            val restingHrIndex = columnIndexMap["RestingHeartRate"]
-            val bbtIndex = columnIndexMap["BasalBodyTemperature"]
-
-            HealthDataRecord(
-                heartRate = hrIndex?.let {
-                    values.getOrNull(it)?.trim()?.toDoubleOrNull()
-                } ?: lastRecord.heartRate,
-
-                stepCount = stepsIndex?.let {
-                    values.getOrNull(it)?.trim()?.toIntOrNull()
-                } ?: lastRecord.stepCount,
-
-                activeEnergyBurned = activeEnergyIndex?.let {
-                    values.getOrNull(it)?.trim()?.toDoubleOrNull()
-                } ?: lastRecord.activeEnergyBurned,
-
-                basalEnergyBurned = basalEnergyIndex?.let {
-                    values.getOrNull(it)?.trim()?.toDoubleOrNull()
-                } ?: lastRecord.basalEnergyBurned,
-
-                cyclePhase = cyclePhaseIndex?.let {
-                    values.getOrNull(it)?.trim()?.takeIf { phase -> phase.isNotBlank() }
-                } ?: lastRecord.cyclePhase,
-
-                cycleDay = cycleDayIndex?.let {
-                    values.getOrNull(it)?.trim()?.toIntOrNull()
-                } ?: lastRecord.cycleDay,
-
-                vo2Max = vo2MaxIndex?.let {
-                    values.getOrNull(it)?.trim()?.toDoubleOrNull()
-                } ?: lastRecord.vo2Max,
-
-                restingHeartRate = restingHrIndex?.let {
-                    values.getOrNull(it)?.trim()?.toDoubleOrNull()
-                } ?: lastRecord.restingHeartRate,
-
-                basalBodyTemperature = bbtIndex?.let {
-                    values.getOrNull(it)?.trim()?.toDoubleOrNull()
-                } ?: lastRecord.basalBodyTemperature
-            )
-        } catch (e: Exception) {
-            Log.e("SimulationManager", "Error parsing record: ${e.message}", e)
-            lastRecord
+        fun getDouble(columnName: String): Double {
+            return values.getOrNull(columnIndexMap[columnName] ?: -1)
+                ?.trim()
+                ?.takeIf { it.isNotEmpty() }
+                ?.toDoubleOrNull() ?: 0.0
         }
+
+        fun getInt(columnName: String): Int {
+            return values.getOrNull(columnIndexMap[columnName] ?: -1)
+                ?.trim()
+                ?.takeIf { it.isNotEmpty() }
+                ?.toIntOrNull() ?: 0
+        }
+
+        fun getString(columnName: String): String {
+            return values.getOrNull(columnIndexMap[columnName] ?: -1)
+                ?.trim() ?: ""
+        }
+
+        return HealthRecordEntity(
+            timestamp = timestamp,
+            heartRate = getDouble("HeartRate"),
+            stepCount = getInt("StepCount"),
+            activeEnergyBurned = getDouble("ActiveEnergyBurned"),
+            basalEnergyBurned = getDouble("BasalEnergyBurned"),
+            cyclePhase = getString("MenstrualCyclePhase"),
+            cycleDay = getInt("MenstrualCycle Day"),
+            vo2Max = getDouble("VO2Max"),
+            restingHeartRate = getDouble("RestingHeartRate"),
+            basalBodyTemperature = getDouble("BasalBodyTemperature")
+        )
+    }
+
+    private fun parseHealthDataRecord(
+        values: List<String>,
+        columnIndexMap: Map<String, Int>
+    ): HealthDataRecord {
+        fun getDouble(columnName: String): Double {
+            return values.getOrNull(columnIndexMap[columnName] ?: -1)
+                ?.trim()
+                ?.takeIf { it.isNotEmpty() }
+                ?.toDoubleOrNull() ?: 0.0
+        }
+
+        fun getInt(columnName: String): Int {
+            return values.getOrNull(columnIndexMap[columnName] ?: -1)
+                ?.trim()
+                ?.takeIf { it.isNotEmpty() }
+                ?.toIntOrNull() ?: 0
+        }
+
+        fun getString(columnName: String): String {
+            return values.getOrNull(columnIndexMap[columnName] ?: -1)
+                ?.trim() ?: ""
+        }
+
+        return HealthDataRecord(
+            heartRate = getDouble("HeartRate"),
+            stepCount = getInt("StepCount"),
+            activeEnergyBurned = getDouble("ActiveEnergyBurned"),
+            basalEnergyBurned = getDouble("BasalEnergyBurned"),
+            cyclePhase = getString("MenstrualCyclePhase"),
+            cycleDay = getInt("MenstrualCycle Day"),
+            vo2Max = getDouble("VO2Max"),
+            restingHeartRate = getDouble("RestingHeartRate"),
+            basalBodyTemperature = getDouble("BasalBodyTemperature")
+        )
     }
 }

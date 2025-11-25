@@ -3,6 +3,7 @@ import android.app.*
 import android.content.Intent
 import android.os.Binder
 import android.os.IBinder
+import android.text.format.DateUtils.formatElapsedTime
 import androidx.compose.runtime.Composable
 
 import androidx.core.app.NotificationCompat
@@ -71,33 +72,6 @@ class WorkoutService : Service() {
             .build()
 
         startForeground(WORKOUT_NOTIFICATION_ID, notification,android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
-    }
-
-
-    fun UpdateNotification(elapsedTime: Long, heartRate: Int, workoutType: String) {
-        val timeString = formatElapsedTime(elapsedTime)
-        val workoutIntent = Intent(this, WorkoutActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-        }
-
-        val pendingIntent = PendingIntent.getActivity(
-            this, 0, workoutIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
-        val notification = NotificationCompat.Builder(this, WORKOUT_NOTIFICATION_CHANNEL_ID)
-            .setContentTitle("$workoutType • $timeString")
-            .setContentText("❤️ $heartRate BPM • Tap to return")
-            .setSmallIcon(R.drawable.heart_icon)
-            .setContentIntent(pendingIntent)
-            .setOngoing(true)
-            .setAutoCancel(false)
-            .setShowWhen(false)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .setCategory(NotificationCompat.CATEGORY_WORKOUT)
-            .build()
-
-        val notificationManager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-        notificationManager.notify(WORKOUT_NOTIFICATION_ID, notification)
     }
 
     override fun onDestroy() {
